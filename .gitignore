@@ -1,0 +1,7 @@
+# Secrets and local state — never commit these.
+.streamlit/secrets.toml
+data/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/

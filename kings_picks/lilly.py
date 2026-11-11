@@ -1,0 +1,158 @@
+"""Lilly — Kings Sports Books Picks' AI.
+
+Her own character, distinct from Ava (VaultTec's trading AI):
+- Risk-first, plain-spoken. Short words, no jargon.
+- Hates losing money. Argues AGAINST a bad pick before she
+  argues for one.
+- Explains every pick in plain words — why it was picked, and
+  what could go wrong.
+- NEVER promises wins. Not in the UI, not in the code, not in
+  her chat. A pick is a chance, never a sure thing.
+
+She works OFFLINE-first: her brief, her chat and her verdicts
+are rule-based and need no LLM key. If a key is ever added,
+it may only restate her verdict in her voice — never change it.
+"""
+
+from __future__ import annotations
+
+BRIEF = """# 💜 Lilly — your picks AI
+
+I'm Lilly. I run the algorithm and build the parlays. I am
+risk-first and plain-spoken: I will tell you when a pick is
+weak before I tell you when one looks good, and I will never
+promise you a win — nobody honest can.
+
+**How I pick:**
+1. I take the odds the sportsbooks offer and turn them into a
+   plain chance (like "this wins about 60 times out of 100").
+   I take the bookmaker's cut out first, so the number is fair.
+2. If I have real recent games for a player, I blend that in —
+   half the odds, half what he just did. Right now there is no
+   free game-log source, so most picks are **odds-only**, and I
+   say so on the pick itself. I never invent a number.
+3. I build your parlays from the highest-chance picks, and I
+   show the TRUE overall chance of each parlay. A 10-pick
+   parlay is a long shot even when it is the best one possible
+   — ten 60% picks together win about 0.6 times out of 100.
+
+**My rules:**
+- Paper tracking only. This app never places a real bet and
+  never moves money.
+- A pick is a chance, never a sure thing. If I say a pick is
+  bad, listen — I hate losing money more than I like winning it.
+- The 3-pick parlays are the steadiest. The 10-picks are fun
+  to track, not a plan to make steady money.
+"""
+
+
+def verdict_for_pick(probability: float, has_form_data: bool, edge: float) -> tuple[str, str]:
+    """Verdict + plain-words reason for one pick.
+
+    Returns (verdict, reason). Verdicts: 'good play' / 'fix this first' / 'bad play'.
+    """
+    if probability < 0.50:
+        return (
+            "bad play",
+            f"This wins less than half the time ({probability:.0%}). "
+            "The odds are against you before you start — I would skip it.",
+        )
+    if not has_form_data:
+        return (
+            "fix this first",
+            f"Odds-only pick at {probability:.0%} — no recent-form data behind it. "
+            "It is the best the odds alone can say, but I cannot check it "
+            "against what the player just did. Fine to track on paper; "
+            "do not treat it as a strong pick.",
+        )
+    if edge >= 0.05:
+        return (
+            "good play",
+            f"Recent form beats the odds by {edge:.0%} — the player has been "
+            f"clearing this line, and the price still pays fairly. "
+            f"Chance about {probability:.0%}. Still not a promise.",
+        )
+    return (
+        "fix this first",
+        f"Chance about {probability:.0%}, but the recent form does not beat "
+        "the odds by much. It is an okay pick, not a strong one.",
+    )
+
+
+def small_win_note(probability: float) -> str:
+    """Lilly is aggressive with small wins — in plain words."""
+    if probability >= 0.60:
+        return "This is one of the stronger legs. If it lands, bank the feeling — small wins add up on paper."
+    return "Nothing special here — track it, do not chase it."
+
+
+def chat_reply(message: str) -> str:
+    """Offline rule-based chat. No LLM key needed for her core job.
+
+    She never promises wins, in any branch.
+    """
+    text = (message or "").lower()
+
+    if any(w in text for w in ("run", "algorithm", "build", "parlay")):
+        return (
+            "Hit the big purple **Run the algorithm** button on this page and "
+            "I will build your 8 parlays — 2 of ten picks, 3 of five, 3 of three — "
+            "from the highest-chance picks I have. I will show the true overall "
+            "chance of each one. The 10-picks are long shots even when they are "
+            "the best possible — that is just the math, and I will not hide it."
+        )
+    if "10" in text or "ten" in text:
+        return (
+            "Ten picks that each win 60% of the time only win together about "
+            "0.6 times out of 100. That is 1 in about 166. I build the best "
+            "10-pick I can, but I want you to know it is a long shot before "
+            "you track it. The 3-picks are the steadier ones."
+        )
+    if any(w in text for w in ("win", "guarantee", "sure", "lock", "promise")):
+        return (
+            "I never promise a win — nobody honest can. Every pick I show is a "
+            "chance, like 60 out of 100. Sometimes the 40 happens. That is why "
+            "this app is paper tracking only: we watch, we learn, we never bet "
+            "real money here."
+        )
+    if any(w in text for w in ("safe", "safest", "best")):
+        return (
+            "The safest thing I build is the 3-pick parlay with the highest "
+            "overall chance. Look for the one with the biggest chance on the "
+            "Dashboard. Even that one can lose — safest does not mean safe."
+        )
+    if any(w in text for w in ("odds", "probability", "chance", "how")):
+        return (
+            "Simple version: I take the sportsbook's odds, turn them into a "
+            "chance out of 100, and take the bookmaker's cut out so the number "
+            "is fair. If I have a player's recent games, I blend that in — half "
+            "odds, half recent form. If I do not, the pick says 'odds-only' and "
+            "I do not pretend to know more."
+        )
+    if any(w in text for w in ("bankroll", "money", "bet", "stake", "how much")):
+        return (
+            "This app never places a bet and never moves money — it is paper "
+            "tracking only. If you ever bet for real, only ever use money you "
+            "can afford to lose completely, and never chase a loss. I hate "
+            "losing money, and chasing is how small losses become big ones."
+        )
+    if any(w in text for w in ("demo", "sample", "offline")):
+        return (
+            "Demo mode uses sample players and sample odds so you can see how "
+            "everything works. It is clearly labelled DEMO on every page, and "
+            "those are NOT live picks. Add the free Odds API key in Setup and "
+            "I will switch to live props."
+        )
+    if any(w in text for w in ("hi", "hello", "hey", "who are you")):
+        return (
+            "Hey — I'm Lilly. I run the picks here. Ask me how the algorithm "
+            "works, what a 10-pick parlay really means, or hit 'Run the "
+            "algorithm' and I will build today's parlays for you. No promises, "
+            "just honest chances."
+        )
+    return (
+        "I can help with how the picks work, what a parlay's true chance is, "
+        "why a pick is odds-only, or building today's parlays. Try asking "
+        "'how does the algorithm work' or 'are 10-pick parlays safe'. "
+        "And remember — I never promise a win."
+    )
