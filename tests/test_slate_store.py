@@ -26,6 +26,7 @@ real PINs exist only in Neko's Streamlit secrets.
 import json
 import sys
 from dataclasses import asdict
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -194,6 +195,12 @@ def test_pick_log_purges_demo_entries_on_load(tmp_path):
 
 
 def _fixture_props(prefix="Fixture", n=14):
+    # Tonight's games start ~3 hours from whenever the test
+    # runs, so the game-day header has a real first lock to
+    # count down to.
+    commence = (
+        datetime.now(timezone.utc) + timedelta(hours=3)
+    ).replace(microsecond=0).isoformat()
     props = []
     for i in range(n):
         for side in ("Over", "Under"):
@@ -201,7 +208,8 @@ def _fixture_props(prefix="Fixture", n=14):
                 player=f"{prefix}{i}", sport="NBA", prop="Points",
                 side=side, line=10.5 + i, odds=-110 - (i % 5) * 10,
                 bookmaker="FixtureBook", event=f"Team{i} vs Team{i + 1}",
-                event_id="evt-fixture", source="live",
+                event_id="evt-fixture", commence_time=commence,
+                source="live",
             ))
     return props
 
@@ -437,6 +445,50 @@ def test_app_no_key_shows_the_setup_note_and_no_picks(tmp_path, monkeypatch):
     assert at.session_state["parlays"] == []
     assert _ticket_texts(at) == []
     assert not (tmp_path / "data" / "current_slate.json").exists()
+    # The game-day banner still shows the date, but with no
+    # slate it invents no games and no lock countdown.
+    banner = "\n".join(m.value for m in at.markdown if "gameday" in m.value)
+    assert "GAME DAY" in banner
+    assert "TONIGHT'S GAMES" not in banner
+    assert "First lock" not in banner
+
+
+def test_app_gameday_header_shows_games_lock_quota_and_stamp(
+    tmp_path, monkeypatch
+):
+    (tmp_path / "data").mkdir()
+    monkeypatch.chdir(tmp_path)
+    holder = {"props": _fixture_props(), "alts": _fixture_alts()}
+    _install_fake_client(monkeypatch, holder, [])
+    at = _login_as_king(_run_app(FAKE_SECRETS))
+    [b for b in at.button if "Run the algorithm" in b.label][0].click().run()
+    assert not at.exception, f"app raised: {at.exception}"
+    # The banner sits at the very top of the page, so on the
+    # pull's own run it still shows the pre-pull state; the
+    # next load — every stored-slate visit — renders it from
+    # the stored slate. Simulate that load.
+    at.run()
+    assert not at.exception, f"app raised: {at.exception}"
+    banner = "\n".join(m.value for m in at.markdown if "gameday" in m.value)
+    assert "GAME DAY" in banner
+    assert "TONIGHT'S GAMES" in banner
+    assert "Team0 vs Team1" in banner  # from the stored slate
+    assert "ET" in banner  # real start time, Detroit
+    assert "First lock in" in banner
+    assert "Stored slate — pulled" in banner
+    assert "Odds API quota: 499 of 500 requests left" in banner
+    # The sportsbook section structure is on the page.
+    subheaders = "\n".join(s.value for s in at.subheader)
+    assert "Tonight's Slate" in subheaders
+    assert "King's style — dropped lines" in subheaders
+    # 👑 King's style LEADS the Dashboard; the standard
+    # slate sits below it (Neko's order, kept in the
+    # stored-slate flow: the store holds both sets and the
+    # Dashboard re-renders them in this order).
+    headers = [s.value for s in at.subheader]
+    king_at = next(i for i, h in enumerate(headers) if "King's style" in h)
+    slate_at = next(i for i, h in enumerate(headers) if "Tonight's Slate" in h)
+    assert king_at < slate_at
 
 
 def test_app_results_show_stamps_and_demo_entries_are_gone(

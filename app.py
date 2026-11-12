@@ -5,10 +5,19 @@ Lilly never promises wins.
 """
 
 import csv
+import html
 import io
 import json
+import re
 from dataclasses import asdict
 from datetime import datetime, timedelta
+
+try:
+    from zoneinfo import ZoneInfo
+
+    _DETROIT = ZoneInfo("America/Detroit")
+except Exception:  # pragma: no cover — zoneinfo is stdlib on supported Pythons
+    _DETROIT = None
 
 import streamlit as st
 
@@ -50,6 +59,22 @@ st.markdown(
         background-color: #2a0a0a; border: 2px solid #e74c3c;
         color: #ffd2cc; padding: 14px; border-radius: 12px; font-size: 18px;
     }
+    .gameday {
+        background: linear-gradient(135deg, #14091f, #2a1152);
+        border: 2px solid #d4af37; border-radius: 12px;
+        padding: 14px 16px; margin-bottom: 14px; font-size: 16px;
+    }
+    .gameday .gd-title {
+        color: #d4af37; font-size: 21px; font-weight: bold;
+        letter-spacing: 1px; text-align: center; margin-bottom: 6px;
+    }
+    .gameday .gd-sec {
+        color: #d4af37; font-weight: bold; letter-spacing: 1px;
+        margin-top: 8px; font-size: 15px;
+    }
+    .gameday .gd-game { margin: 3px 0; font-size: 16px; }
+    .gameday .gd-lock { margin-top: 8px; font-size: 17px; font-weight: bold; }
+    .gameday .gd-line { margin-top: 6px; font-size: 15px; }
     .pick-card {
         background-color: #1c1026; border: 1px solid #7b2fbe;
         border-radius: 12px; padding: 12px; margin-bottom: 10px;
@@ -920,10 +945,111 @@ def run_algorithm(force_refresh: bool = False):
     return parlays, mode, note
 
 
+# ================= GAME-DAY HEADER =================
+# Presentation only: everything below reads the stored
+# slate / session as it already stands — no API calls, no
+# rescore, nothing recomputed but the clock.
+
+def _parse_commence(value):
+    """A book commence_time (ISO) -> aware Detroit datetime,
+    or None when the slate carries no usable time."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=_DETROIT) if _DETROIT else parsed
+    return parsed.astimezone(_DETROIT) if _DETROIT else parsed
+
+
+def _gameday_games():
+    """Tonight's games from the stored slate's board: unique
+    (sport, event) pairs with their real start times,
+    earliest first (games without a listed time go last)."""
+    seen: dict = {}
+    for prop in st.session_state.get("raw_props", []):
+        event = getattr(prop, "event", "")
+        if event:
+            seen.setdefault(
+                (prop.sport, event), getattr(prop, "commence_time", "") or ""
+            )
+    games = [
+        {"sport": sport, "event": event, "starts": _parse_commence(commence)}
+        for (sport, event), commence in seen.items()
+    ]
+    games.sort(
+        key=lambda g: (
+            g["starts"].timestamp() if g["starts"] else float("inf"),
+            g["event"],
+        )
+    )
+    return games
+
+
+def _render_gameday_header():
+    """The sportsbook game-day banner at the top of the
+    Dashboard: today's date, tonight's games with start
+    times, the countdown to the first lock, the stored-slate
+    stamp, and the Odds API quota when the last pull's note
+    reported it."""
+    now = datetime.now(_DETROIT) if _DETROIT else datetime.now()
+    lines = [
+        "<div class='gd-title'>🏟️ GAME DAY — "
+        f"{now.strftime('%A, %B')} {now.day}, {now.year}</div>"
+    ]
+    games = _gameday_games()
+    if games:
+        lines.append("<div class='gd-sec'>TONIGHT'S GAMES</div>")
+        for game in games:
+            when = (
+                game["starts"].strftime("%-I:%M %p ET")
+                if game["starts"]
+                else "start time not listed"
+            )
+            lines.append(
+                f"<div class='gd-game'>{game['sport']} · "
+                f"{html.escape(game['event'])} — {when}</div>"
+            )
+        future = [g["starts"] for g in games if g["starts"] and g["starts"] > now]
+        if future:
+            total_minutes = int((future[0] - now).total_seconds() // 60)
+            hours, minutes = divmod(total_minutes, 60)
+            clock = f"{hours}h {minutes:02d}m" if hours else f"{minutes}m"
+            lines.append(
+                f"<div class='gd-lock'>⏰ First lock in {clock} — "
+                f"{future[0].strftime('%-I:%M %p ET')}</div>"
+            )
+        elif any(g["starts"] for g in games):
+            lines.append(
+                "<div class='gd-lock'>🔴 First lock has passed — "
+                "games are underway or done.</div>"
+            )
+    pulled_at = st.session_state.get("pulled_at", "")
+    if pulled_at:
+        when = slate_store.format_pulled_at(pulled_at)
+        if when:
+            lines.append(
+                f"<div class='gd-line'>📌 Stored slate — pulled {when}</div>"
+            )
+    note = st.session_state.get("note", "") or ""
+    quota = re.search(r"\d+ of 500 requests left[^|]*", note)
+    if quota:
+        lines.append(
+            f"<div class='gd-line'>🎟️ Odds API quota: {quota.group(0).strip()}</div>"
+        )
+    st.markdown(
+        "<div class='gameday'>" + "".join(lines) + "</div>",
+        unsafe_allow_html=True,
+    )
+
+
 # ================= DASHBOARD =================
 if page == "Dashboard":
     st.title("👑 Kings Sports Books Picks")
     st.subheader("Today's parlays — built by Lilly")
+    _render_gameday_header()
 
     if st.session_state["parlays"]:
         st.markdown(
@@ -978,7 +1104,7 @@ if page == "Dashboard":
             for king_parlay in king_parlays:
                 render_parlay(king_parlay, st.session_state["mode"])
                 st.markdown("---")
-        st.subheader("Lilly's standard lines")
+        st.subheader("🎟️ Tonight's Slate — Lilly's standard lines")
         for parlay in st.session_state["parlays"]:
             render_parlay(parlay, st.session_state["mode"])
             st.markdown("---")
