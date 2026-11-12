@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 
 import streamlit as st
 
-from kings_picks import breakdown, demo_data, game_logs, learning, lilly, players, profiles, projection, slip
+from kings_picks import breakdown, demo_data, game_logs, king_style, learning, lilly, players, profiles, projection, slip
 from kings_picks.ledger import Ledger
 from kings_picks.model import SCORING_VERSION, score_prop
 from kings_picks.odds_api import OddsApiClient, market_key_for_label
@@ -509,12 +509,25 @@ def render_parlay(parlay, mode: str):
     for pick in parlay.picks:
         verdict, reason = lilly.verdict_for_pick(pick.probability, pick.has_form_data, pick.edge)
         odds_only = "⚠️ Odds-only — no recent-form data" if not pick.has_form_data else "✅ Recent form included"
+        # King-style annotations (kings_picks/king_style.py):
+        # a dropped leg names the line it came from, and a
+        # kept leg says plainly why it is still standard.
+        # Standard picks carry neither attribute and render
+        # exactly as they always have.
+        title = pick.label
+        base_line = getattr(pick, "base_line", None)
+        if base_line is not None and float(base_line) != float(pick.line):
+            verb = "dropped" if pick.side == "Over" else "raised"
+            title = f"{pick.label} ({verb} from {float(base_line):g})"
+        king_note = getattr(pick, "king_note", "") or ""
+        king_html = f"<i>👑 {king_note}</i><br>" if king_note else ""
         st.markdown(
             f"<div class='pick-card'>"
-            f"<b style='font-size:18px'>{pick.label}</b><br>"
+            f"<b style='font-size:18px'>{title}</b><br>"
             f"Odds: {pick.odds:+d} &nbsp;|&nbsp; Chance: <b>{pick.probability:.0%}</b> &nbsp;|&nbsp; "
             f"{pick.bookmaker or ''} &nbsp;|&nbsp; {pick.event}<br>"
             f"{odds_only}<br>"
+            f"{king_html}"
             f"<i>{pick.why}</i><br>"
             f"<b>Lilly's verdict: {verdict}</b> — {reason}"
             f"</div>",
@@ -553,6 +566,9 @@ if "parlays" not in st.session_state:
     st.session_state["parlays"] = []
     st.session_state["mode"] = "demo"
     st.session_state["note"] = ""
+if "king_parlays" not in st.session_state:
+    st.session_state["king_parlays"] = []
+    st.session_state["king_info"] = {}
 if "scored" not in st.session_state:
     st.session_state["scored"] = []
 if "raw_props" not in st.session_state:
@@ -562,8 +578,9 @@ if "raw_props" not in st.session_state:
 def run_algorithm(force_refresh: bool = False):
     props, mode, note = load_props(force_refresh=force_refresh)
     form_lookup = _form_lookup_for(mode)
+    learning_lookup = _learning_lookup_for(mode)
     scored = score_all(
-        props, form_lookup=form_lookup, learning_lookup=_learning_lookup_for(mode)
+        props, form_lookup=form_lookup, learning_lookup=learning_lookup
     )
     st.session_state["raw_props"] = props
     parlays, build_notes = build_parlays(scored)
@@ -571,9 +588,50 @@ def run_algorithm(force_refresh: bool = False):
     st.session_state["scored"] = scored
     st.session_state["mode"] = mode
     st.session_state["note"] = note + (" | " + " | ".join(build_notes) if build_notes else "")
+
+    # 👑 King's style: the same parlays rebuilt at Neko's
+    # dropped lines (kings_picks/king_style.py). LIVE runs
+    # only — dropped lines are priced from the books' real
+    # alternate markets, and demo has none, so demo builds
+    # nothing here and the Dashboard shows one explainer
+    # line instead. QUOTA: alternates are fetched ONLY for
+    # the unique (event, market) pairs inside the final
+    # parlays, through the disk-cached client — never
+    # slate-wide.
+    king_parlays: list = []
+    king_info: dict = {}
+    if mode == "live" and parlays:
+        client = get_client()
+
+        def _king_fetch(sport, event_id, market_key, event="", commence_time=""):
+            eid = event_id or client.resolve_event_id(sport, event, commence_time) or ""
+            if not eid:
+                return []
+            result = client.fetch_alternates(sport, eid, market_key)
+            return list(result.prices) if result.ok else []
+
+        king_parlays, king_info = king_style.build_king_parlays(
+            parlays,
+            _king_fetch,
+            form_lookup=form_lookup,
+            learning_lookup=learning_lookup,
+        )
+        st.session_state["note"] += (
+            f" | 👑 King style: {king_info['legs_dropped']} legs dropped, "
+            f"{king_info['legs_kept_standard']} kept standard — dropped lines "
+            f"priced for {king_info['pairs_fetched']} event/market pair(s) "
+            f"(cached, so re-runs are free)."
+        )
+    st.session_state["king_parlays"] = king_parlays
+    st.session_state["king_info"] = king_info
+
     if parlays:
         LEDGER.record_run(parlays, mode, profile=active_profile, model=SCORING_VERSION)
-        PICK_LOG.record_run(parlays, mode, model=SCORING_VERSION)
+        # Standard legs first: a King leg kept at the standard
+        # line IS the standard pick (same log key), so it is
+        # logged once, as standard; dropped King legs log
+        # separately, tagged style="king", source="lilly".
+        PICK_LOG.record_run(parlays + king_parlays, mode, model=SCORING_VERSION)
     return parlays, mode, note
 
 
@@ -612,6 +670,31 @@ if page == "Dashboard":
             unsafe_allow_html=True,
         )
     else:
+        # 👑 King's style leads: Neko's dropped-line rebuild
+        # of the same parlays. Live runs build it for real;
+        # demo can't (no real alternate prices exist there),
+        # so demo shows one explainer line instead of
+        # invented dropped parlays.
+        st.subheader("👑 King's style — dropped lines")
+        king_parlays = st.session_state.get("king_parlays", [])
+        if king_parlays:
+            st.write(
+                "Built King's way: take the number he's known for, drop it down "
+                "a few, play the safer side of it — small money adds up. Every "
+                "leg is priced at the books' real alternate price. A leg whose "
+                "dropped line no book offers keeps its standard line, and the "
+                "card says so plainly."
+            )
+            for king_parlay in king_parlays:
+                render_parlay(king_parlay, st.session_state["mode"])
+                st.markdown("---")
+        elif st.session_state["mode"] != "live":
+            st.info(
+                "👑 King's style is built from the books' live alternate "
+                "lines — it appears on live slates only. Demo has no real "
+                "alternate prices, so Lilly won't invent dropped parlays here."
+            )
+        st.subheader("Lilly's standard lines")
         for parlay in st.session_state["parlays"]:
             render_parlay(parlay, st.session_state["mode"])
             st.markdown("---")
@@ -1098,7 +1181,9 @@ elif page == "Results / Ledger":
         "played it or not**. Settlement is by hand — no free feed has final player "
         "stats, so after the games you tap Won or Lost here. Lilly never guesses a result. "
         "Picks built by hand on **My Slip** land here too, tagged ✋ Your pick — settle "
-        "them the same way."
+        "them the same way. Legs from the 👑 King's style parlays are tagged "
+        "**👑 King's style** — her picks at dropped lines; they are her record, "
+        "they count and teach exactly like her standard-line picks."
     )
     st.caption(
         "Scoring eras: picks tagged **v2** were scored with Lilly's projection "
@@ -1144,10 +1229,11 @@ elif page == "Results / Ledger":
             for entry in group:
                 demo_tag = " · DEMO" if entry.mode == "demo" else ""
                 manual_tag = " · ✋ Your pick" if getattr(entry, "source", "lilly") == "manual" else ""
+                king_tag = " · 👑 King's style" if getattr(entry, "style", "standard") == "king" else ""
                 i_played = active_profile in entry.played_by
                 st.markdown(
                     f"<div class='pick-card'>"
-                    f"<b style='font-size:17px'>{entry.label}</b> — {entry.sport}{demo_tag}{manual_tag} · {entry.model}<br>"
+                    f"<b style='font-size:17px'>{entry.label}</b> — {entry.sport}{demo_tag}{manual_tag}{king_tag} · {entry.model}<br>"
                     f"{entry.event} &nbsp;|&nbsp; Odds: {entry.odds:+d} &nbsp;|&nbsp; "
                     f"Chance: <b>{entry.probability:.0%}</b>"
                     f"</div>",
@@ -1172,12 +1258,13 @@ elif page == "Results / Ledger":
                 mark = "✅ Won" if entry.status == "won" else "❌ Lost"
                 demo_tag = " · DEMO" if entry.mode == "demo" else ""
                 manual_tag = " · ✋ Your pick" if getattr(entry, "source", "lilly") == "manual" else ""
+                king_tag = " · 👑 King's style" if getattr(entry, "style", "standard") == "king" else ""
                 played_note = (
                     f" · played by {', '.join(entry.played_by)}" if entry.played_by else ""
                 )
                 learned_note = f" · 📚 learned: {entry.learning}" if entry.learning else ""
                 st.write(
-                    f"{mark} — **{entry.label}** — {entry.event} · {entry.date}{demo_tag}{manual_tag} · {entry.model}{played_note}{learned_note}"
+                    f"{mark} — **{entry.label}** — {entry.event} · {entry.date}{demo_tag}{manual_tag}{king_tag} · {entry.model}{played_note}{learned_note}"
                 )
             if len(settled_entries) > 30:
                 st.caption(f"Showing the newest 30 of {len(settled_entries)} settled picks.")

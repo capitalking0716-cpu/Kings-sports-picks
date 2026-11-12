@@ -39,6 +39,17 @@ NEVER teach her learning loop (kings_picks/learning.py) —
 grading her probabilities against hand-picked selections
 would contaminate her calibration.
 
+And a `style` tag: "standard" for legs played at the books'
+main lines (the default — every entry saved before the tag
+existed is standard), or "king" for legs from the King-style
+parlays (kings_picks/king_style.py) — Lilly's picks rebuilt
+at Neko's dropped lines. King entries are still source=
+"lilly": they ARE her picks, his style, her stated chance
+at the dropped line is her number, and settled King entries
+teach her learning loop like any of her own picks. A dropped
+King leg's label names the line it was dropped from, and it
+settles against the line it PLAYED, never the standard one.
+
 Paper tracking only. No real bets, no money moved.
 """
 
@@ -103,6 +114,13 @@ class PickEntry:
     # out of Lilly's headline hit rate and NEVER fed to her
     # learning loop.
     source: str = "lilly"
+    # Which line style produced this pick: "standard" (the
+    # books' main lines — the default, and what every entry
+    # saved before this field existed loads as) or "king"
+    # (a King-style parlay leg at a dropped line, from
+    # kings_picks/king_style.py). King entries keep source=
+    # "lilly" — her picks, his style — and teach her loop.
+    style: str = "standard"
 
 
 class PickLog:
@@ -150,12 +168,26 @@ class PickLog:
         known = {e.key for e in self.entries}
         added: list[PickEntry] = []
         for parlay in parlays:
+            # The parlay's line style rides onto every leg:
+            # "king" for King-style parlays, "standard" for
+            # everything else (including parlays built before
+            # the Parlay.style field existed).
+            style = getattr(parlay, "style", "standard") or "standard"
             for pick in parlay.picks:
                 market = f"{pick.prop} {pick.side}"
                 key = pick_key(created, pick.event, pick.player, market, pick.line)
                 if key in known:
                     continue
                 known.add(key)
+                # A dropped King leg's label names the line
+                # it came from ("...(dropped from 24.5)") —
+                # the entry settles against the PLAYED line,
+                # which is `line` here, never the base.
+                label = pick.label
+                base_line = getattr(pick, "base_line", None)
+                if base_line is not None and float(base_line) != float(pick.line):
+                    verb = "dropped" if pick.side == "Over" else "raised"
+                    label = f"{pick.label} ({verb} from {float(base_line):g})"
                 entry = PickEntry(
                     id=key,
                     key=key,
@@ -168,9 +200,10 @@ class PickLog:
                     odds=int(pick.odds),
                     probability=float(pick.probability),
                     mode=mode,
-                    label=pick.label,
+                    label=label,
                     model=model,
                     learning=getattr(pick, "learning", "") or "",
+                    style=style,
                 )
                 self.entries.append(entry)
                 added.append(entry)

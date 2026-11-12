@@ -116,6 +116,8 @@ may only restate her verdict in her voice — never change it.
 ## Pages
 
 - **Dashboard** — today's parlays, with true overall chance and expected value.
+  On live slates the **👑 King's style** set (dropped lines) leads, with
+  Lilly's standard-line set directly below it.
 - **Props** — every prop Lilly can see, with its chance and why.
 - **🎟️ My Slip** — build your own slip from the same board: per-selection odds
   and Lilly's chance, combined odds, true overall chance, and an adjustable
@@ -149,6 +151,35 @@ Lilly recalibrates from her own settled record (`kings_picks/learning.py`):
   enough settled picks yet" when that is the truth.
 - Learning reads the on-disk pick log only — **zero Odds API calls**.
   Recalibration is not a promise of profit or accuracy.
+
+## 👑 King's style parlays (Lilly builds his way)
+
+Neko's style — "take the number he's known for, drop it down a few, play
+that; small money adds up" — is how Lilly leads on live slates
+(`kings_picks/king_style.py`):
+
+- Every generated parlay (2× 10-pick, 3× 5-pick, 3× 3-pick) gets a
+  King-style counterpart: each leg replaced by its dropped version at the
+  **middle step** of the market's drop table (Points −4, Rushing Yards −20,
+  Passing Yards −50), priced with the book's **real alternate price** and
+  scored through the same v2 path as the board (projection at the new
+  line, learning corrections included). Combined odds, true overall
+  chance and EV are recomputed from the dropped legs — safer legs, smaller
+  payout, same honest maths.
+- **Fallback is labelled, never silent:** a leg whose dropped line no book
+  offers — or whose market has no drop (Anytime Touchdown) — keeps its
+  standard leg, and the card says "standard leg kept" on that leg.
+- **Quota guard:** alternates are fetched only for the unique
+  (event, market) pairs inside the final parlays — never slate-wide —
+  through the 6-hour disk cache, so a generation costs at most one
+  request per distinct pair and re-runs are free. **Demo builds no King
+  set at all** — one explainer line shows instead, because dropped lines
+  need live prices and Lilly doesn't invent them.
+- **Logging & learning:** King legs log like her standard legs
+  (`source="lilly"`) with a `style="king"` tag (shown on Results), settle
+  against the played (dropped) line, and **teach her learning loop** —
+  they are her picks, his style. Only hand-built manual picks stay
+  excluded from teaching.
 
 ## My Slip (manual pick-slip builder)
 
@@ -239,6 +270,7 @@ kings_picks/
   parlays.py              Parlay builder (highest overall chance, no duplicates)
   lilly.py                Lilly — brief, verdicts, offline chat
   learning.py             Self-learning loop (calibration from settled live picks)
+  king_style.py           King's style parlays — her parlays rebuilt at dropped lines
   slip.py                 My Slip — manual pick-slip builder (calculator, per-profile)
   pick_log.py             Every pick logged and tracked won/lost, played or not
   ledger.py               Results ledger (local JSON, per-profile records)

@@ -38,6 +38,13 @@ class Parlay:
     decimal_payout: float = 0.0
     expected_value_per_dollar: float = 0.0
     label: str = ""
+    # Which line style the legs are played at: "standard"
+    # (the books' main lines — everything this builder makes)
+    # or "king" (Neko's dropped-line style, built by
+    # kings_picks/king_style.py as counterparts of these).
+    # The pick log stamps the tag onto every logged leg, so
+    # Lilly's record can be split by style later.
+    style: str = "standard"
 
     @property
     def one_in(self) -> float:
