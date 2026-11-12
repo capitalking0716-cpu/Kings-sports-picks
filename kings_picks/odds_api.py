@@ -314,7 +314,7 @@ class OddsApiClient:
         self,
         api_key: str = "",
         cache_dir: Path | str = "data/cache",
-        bookmakers: tuple[str, ...] = ("draftkings", "fanduel"),
+        bookmakers: tuple[str, ...] = ("betmgm", "bet365"),
         session: requests.Session | None = None,
     ):
         self.api_key = api_key or get_api_key()

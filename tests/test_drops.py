@@ -253,7 +253,7 @@ def _alt_event_payload():
         "home_team": "Lakers", "away_team": "Celtics",
         "commence_time": "2026-11-13T00:00:00Z",
         "bookmakers": [
-            {"key": "draftkings", "title": "DraftKings", "markets": [
+            {"key": "betmgm", "title": "BetMGM", "markets": [
                 # The standard market rides along in the
                 # payload and must NOT be read as alternates.
                 {"key": "player_points", "outcomes": [
@@ -270,15 +270,15 @@ def _alt_event_payload():
                     {"description": "Other Guy", "name": "Over", "point": 22.5, "price": 100},
                 ]},
             ]},
-            {"key": "fanduel", "title": "FanDuel", "markets": [
+            {"key": "bet365", "title": "bet365", "markets": [
                 {"key": "player_points_alternate", "outcomes": [
-                    # A better Over 22.5 price than DraftKings'.
+                    # A better Over 22.5 price than BetMGM's.
                     {"description": "LeBron James", "name": "Over", "point": 22.5, "price": -195},
                 ]},
             ]},
             # A book Lilly doesn't ask for: ignored even at a
             # too-good price.
-            {"key": "betmgm", "title": "BetMGM", "markets": [
+            {"key": "draftkings", "title": "DraftKings", "markets": [
                 {"key": "player_points_alternate", "outcomes": [
                     {"description": "LeBron James", "name": "Over", "point": 22.5, "price": 500},
                 ]},
@@ -292,17 +292,17 @@ def test_parse_event_alternates_fixture():
     assert market_key_for_label("Points") == "player_points"
     rows = _parse_event_alternates(
         _alt_event_payload(), "NBA", "player_points",
-        ("draftkings", "fanduel"),
+        ("betmgm", "bet365"),
     )
     assert len(rows) == 7
     by = {(r.player, r.side, r.line): r for r in rows}
     best = by[("LeBron James", "Over", 22.5)]
-    assert best.odds == -195 and best.bookmaker == "FanDuel"  # best price wins
+    assert best.odds == -195 and best.bookmaker == "bet365"  # best price wins
     assert by[("LeBron James", "Under", 22.5)].odds == 165
     assert by[("LeBron James", "Over", 20.5)].odds == -320
     assert by[("LeBron James", "Under", 18.5)].odds == 340
     assert by[("Other Guy", "Over", 22.5)].odds == 100
-    # Nothing from the standard market, nothing from BetMGM.
+    # Nothing from the standard market, nothing from DraftKings.
     assert all(r.line != 24.5 for r in rows)
     assert all(r.odds != 500 for r in rows)
     assert all(r.prop == "Points" and r.market_key == "player_points" for r in rows)
@@ -336,6 +336,59 @@ class _FakeSession:
     def get(self, url, params=None, timeout=None):
         self.calls.append((url, dict(params or {})))
         return self.handler(url, params or {})
+
+
+def _std_event_payload():
+    return {
+        "id": "evt123",
+        "home_team": "Lakers", "away_team": "Celtics",
+        "commence_time": "2026-11-13T00:00:00Z",
+        "bookmakers": [
+            {"key": "betmgm", "title": "BetMGM", "markets": [
+                {"key": "player_points", "outcomes": [
+                    {"description": "LeBron James", "name": "Over", "point": 24.5, "price": -110},
+                    {"description": "LeBron James", "name": "Under", "point": 24.5, "price": -110},
+                ]},
+            ]},
+            {"key": "bet365", "title": "bet365", "markets": [
+                {"key": "player_points", "outcomes": [
+                    # A better Over price than BetMGM's -110.
+                    {"description": "LeBron James", "name": "Over", "point": 24.5, "price": -105},
+                ]},
+            ]},
+        ],
+    }
+
+
+def test_default_client_asks_for_betmgm_and_bet365(tmp_path):
+    # Neko plays on bet365 and BetMGM — NOT DraftKings/FanDuel.
+    # A default-constructed client must ask The Odds API for
+    # exactly his two books, on BOTH the standard props pull
+    # and the on-demand alternates fetch. No silent fallback.
+    def handler(url, params):
+        if url.endswith("/events"):
+            return _Resp([{"id": "evt123",
+                           "commence_time": "2026-11-13T00:00:00Z",
+                           "home_team": "Lakers", "away_team": "Celtics"}])
+        if "alternate" in (params.get("markets") or ""):
+            return _Resp(_alt_event_payload())
+        return _Resp(_std_event_payload())
+
+    session = _FakeSession(handler)
+    client = OddsApiClient(api_key="TESTKEY", cache_dir=tmp_path, session=session)
+    assert client.bookmakers == ("betmgm", "bet365")
+
+    pulled = client.fetch_props("NBA", force_refresh=True)
+    assert pulled.ok and len(pulled.props) == 2  # the Over/Under pair
+    over = next(p for p in pulled.props if p.side == "Over")
+    assert over.bookmaker == "bet365"  # -105 beat BetMGM's -110
+
+    alt = client.fetch_alternates("NBA", "evt123", "player_points")
+    assert alt.ok and len(alt.prices) == 7
+
+    odds_calls = [p for u, p in session.calls if "/odds" in u]
+    assert len(odds_calls) == 2  # one standard pull + one alternates fetch
+    assert all(p["bookmakers"] == "betmgm,bet365" for p in odds_calls)
 
 
 def test_fetch_alternates_fires_once_then_serves_cache(tmp_path):
