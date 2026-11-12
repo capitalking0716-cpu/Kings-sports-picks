@@ -6,7 +6,7 @@ Lilly never promises wins.
 
 import streamlit as st
 
-from kings_picks import demo_data, lilly
+from kings_picks import demo_data, lilly, profiles
 from kings_picks.ledger import Ledger
 from kings_picks.model import score_prop
 from kings_picks.odds_api import OddsApiClient
@@ -56,6 +56,77 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+# ---- Profiles gate: King & Kohen, 4-digit PIN login ----
+# Nothing in the app renders until a profile is signed in. PINs are
+# read ONLY from Streamlit secrets (KING_PIN / KOHEN_PIN), set by
+# Neko himself — they are never in this code.
+
+def _secrets_snapshot() -> dict:
+    """The PIN secrets as a plain dict. st.secrets raises when no
+    secrets exist at all, so any failure here means "not set up"."""
+    snapshot = {}
+    try:
+        for key in profiles.SECRET_KEYS.values():
+            snapshot[key] = st.secrets.get(key)
+    except Exception:
+        return {}
+    return snapshot
+
+
+SECRETS = _secrets_snapshot()
+
+if not profiles.profiles_configured(SECRETS):
+    st.title("👑 Kings Sports Books Picks")
+    st.markdown(
+        "<div class='warn-box'><b>Profiles not set up yet.</b><br>"
+        "This app has two profiles — King and Kohen — and each one needs "
+        "a 4-digit PIN before anyone can get in.<br><br>"
+        "Owner: open this app's <b>Settings → Secrets</b> and add two lines "
+        "(choose your own PINs — they are never stored in the app itself):<br>"
+        "<code>KING_PIN = \"....\"</code><br>"
+        "<code>KOHEN_PIN = \"....\"</code><br><br>"
+        "Then reboot the app.</div>",
+        unsafe_allow_html=True,
+    )
+    st.stop()
+
+active_profile = st.session_state.get("active_profile")
+if active_profile not in profiles.PROFILES:
+    active_profile = None
+
+if active_profile is None:
+    st.title("👑 Kings Sports Books Picks")
+    st.subheader("Who's playing? Pick your profile.")
+    pending_profile = st.session_state.get("pending_profile")
+    if pending_profile not in profiles.PROFILES:
+        cols = st.columns(len(profiles.PROFILES))
+        for col, name in zip(cols, profiles.PROFILES):
+            if col.button(profiles.PROFILE_LABELS[name], key=f"login-{name.lower()}"):
+                st.session_state["pending_profile"] = name
+                st.rerun()
+    else:
+        st.markdown(f"### PIN for {profiles.PROFILE_LABELS[pending_profile]}")
+        with st.form("pin_form", clear_on_submit=True):
+            pin_entry = st.text_input(
+                "4-digit PIN",
+                type="password",
+                max_chars=4,
+                key="pin_entry",
+                placeholder="••••",
+            )
+            submitted = st.form_submit_button("Log in")
+        if submitted:
+            if profiles.verify_pin(pending_profile, pin_entry, SECRETS):
+                st.session_state["active_profile"] = pending_profile
+                st.session_state.pop("pending_profile", None)
+                st.rerun()
+            else:
+                st.error("❌ Wrong PIN — it has to be exactly the 4 digits. Try again.")
+        if st.button("← Back to profiles", key="login-back"):
+            st.session_state.pop("pending_profile", None)
+            st.rerun()
+    st.stop()
 
 DATA_DIR = "data"
 LEDGER = Ledger(f"{DATA_DIR}/ledger.json")
@@ -138,6 +209,11 @@ def render_parlay(parlay, mode: str):
 # ---- Sidebar ----
 st.sidebar.title("👑 Kings Picks")
 st.sidebar.markdown("**Neko's own picks platform.** Paper tracking only — no real bets, no money moved.")
+st.sidebar.markdown(f"### Signed in as {profiles.PROFILE_LABELS[active_profile]}")
+if st.sidebar.button("Log out / switch profile", key="logout"):
+    st.session_state.pop("active_profile", None)
+    st.session_state.pop("pending_profile", None)
+    st.rerun()
 page = st.sidebar.radio(
     "Go to",
     ["Dashboard", "Props", "💜 Lilly", "Results / Ledger", "Setup"],
@@ -167,7 +243,7 @@ def run_algorithm(force_refresh: bool = False):
     st.session_state["mode"] = mode
     st.session_state["note"] = note + (" | " + " | ".join(build_notes) if build_notes else "")
     if parlays:
-        LEDGER.record_run(parlays, mode)
+        LEDGER.record_run(parlays, mode, profile=active_profile)
     return parlays, mode, note
 
 
@@ -263,7 +339,11 @@ elif page == "Results / Ledger":
         "Paper tracking only. Mark each pick won or lost after the games. "
         "This record is what proves the picks work — or do not — over time."
     )
-    stats = LEDGER.stats()
+    st.write(
+        f"Showing **{profiles.PROFILE_LABELS[active_profile]}'s record only** — "
+        "parlays recorded while signed in under the other profile are not counted here."
+    )
+    stats = LEDGER.stats(profile=active_profile)
     col1, col2, col3 = st.columns(3)
     col1.metric("Parlays tracked", stats["total_parlays"])
     col2.metric("Parlays settled", stats["settled_parlays"])
@@ -275,7 +355,7 @@ elif page == "Results / Ledger":
         st.write(f"**{size}-pick:** {row['won']} won of {row['parlays']} settled — {rate}")
 
     st.subheader("Settle results")
-    for lp in reversed(LEDGER.parlays[-10:]):
+    for lp in reversed(LEDGER.parlays_for_profile(active_profile)[-10:]):
         with st.expander(f"{lp.date} — {lp.label} ({lp.mode}) — {lp.picks_won} won / {lp.picks_lost} lost / {lp.picks_pending} pending"):
             for pick in lp.picks:
                 c1, c2, c3 = st.columns([5, 1, 1])

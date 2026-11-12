@@ -1,8 +1,9 @@
 # 👑 Kings Sports Books Picks
 
 Neko's own sports betting picks platform — like Props Edge, but his.
-Built by Lilly, his picks AI. **Local only, for his PC. Paper tracking only:
-this app never places a real bet and never moves money.**
+Built by Lilly, his picks AI. **Runs as a private Streamlit Cloud app (owner and
+invited viewers only). Paper tracking only: this app never places a real bet
+and never moves money.**
 
 - **Sports:** NBA + NFL to start (both in season in November). NHL later.
 - **What it builds, every run:** 2 parlays of 10 picks, 3 of 5 picks, 3 of 3 picks —
@@ -45,6 +46,36 @@ streamlit run app.py
 ```
 
 Then open the address Streamlit prints (usually http://localhost:8501) in your browser.
+
+## Profiles (King & Kohen)
+
+The app opens with a login screen. There are exactly two profiles:
+
+- **👑 King** — Neko
+- **Kohen** — his son
+
+Tap your profile, type your **4-digit PIN**, and you're in. The picks pages
+(Dashboard, Props) and Lilly's chat are shared — both profiles see the same
+slates. **Results / Ledger is per-profile:** parlays recorded while King is
+signed in count only in King's record, same for Kohen, and each profile's hit
+rates are figured from its own record. Entries saved before profiles existed
+have no tag and count as King's.
+
+**PINs live only in Streamlit Secrets** — never in the code, never in this
+repo, never in chat. The owner sets them in the app's **Settings → Secrets**
+(on Streamlit Cloud) or in the local `.streamlit/secrets.toml`, as two lines:
+
+```toml
+KING_PIN = "...."
+KOHEN_PIN = "...."
+```
+
+(replace the `....` with each person's own 4 digits, and keep the quotes).
+
+If those two lines are missing, the app shows a "Profiles not set up yet"
+screen and lets nobody in — there is no default PIN and no way around the
+login. Use **Log out / switch profile** in the sidebar to change who is
+signed in.
 
 ## How to get the free Odds API key — 5 steps
 
@@ -99,10 +130,10 @@ app. The ledger record is what earns the right to sell it later.
 
 ## A note about Kohen
 
-This folder is self-contained so a copy can be gifted to Neko's son Kohen later.
-**That copy is NOT built now, and Kohen's age is unknown. Sports betting in
-Michigan is 21+.** Do not hand Kohen a betting program — or let him bet — until his
-age is confirmed and he is legally old enough.
+Kohen is Neko's son. He is **21 (confirmed 2026-11-10)** — of legal betting age
+in Michigan. Neko gifts him access through his own **Kohen profile** (4-digit
+PIN) in this app, plus a viewer invite to the private Streamlit app so he can
+open it on his own phone. His Results/Ledger record is separate from King's.
 
 ## Files
 
@@ -114,7 +145,8 @@ kings_picks/
   model.py                Transparent probability model (odds -> chance, vig removed)
   parlays.py              Parlay builder (highest overall chance, no duplicates)
   lilly.py                Lilly — brief, verdicts, offline chat
-  ledger.py               Results ledger (local JSON)
+  ledger.py               Results ledger (local JSON, per-profile records)
+  profiles.py             King & Kohen PIN login (PINs live only in Streamlit secrets)
   demo_data.py            Clearly-labelled sample data for demo/offline mode
 tests/                    pytest suite (must stay green)
 data/                     Local cache + ledger (gitignored, never committed)
