@@ -28,9 +28,10 @@ promise you a win — nobody honest can.
    plain chance (like "this wins about 60 times out of 100").
    I take the bookmaker's cut out first, so the number is fair.
 2. If I have real recent games for a player, I blend that in —
-   half the odds, half what he just did. Right now there is no
-   free game-log source, so most picks are **odds-only**, and I
-   say so on the pick itself. I never invent a number.
+   half the odds, half what he just did. NFL form comes free
+   from nflverse; NBA form comes from stats.nba.com when that
+   feed answers. Players no feed covers stay **odds-only**,
+   and I say so on the pick itself. I never invent a number.
 3. I build your parlays from the highest-chance picks, and I
    show the TRUE overall chance of each parlay. A 10-pick
    parlay is a long shot even when it is the best one possible

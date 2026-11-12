@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 
 import streamlit as st
 
-from kings_picks import demo_data, lilly, profiles
+from kings_picks import breakdown, demo_data, game_logs, lilly, profiles
 from kings_picks.ledger import Ledger
 from kings_picks.model import score_prop
 from kings_picks.odds_api import OddsApiClient
@@ -250,10 +250,37 @@ def load_props(force_refresh: bool = False):
     return props, "live", note
 
 
-def score_all(props):
+def _form_lookup_for(mode: str):
+    """The real-form lookup for one run, or None.
+
+    Only LIVE runs ever touch the free stats feeds (nflverse
+    for the NFL, stats.nba.com for the NBA) — demo runs must
+    never acquire form data, and any feed failure just means
+    this run stays odds-only. The loaded logs are stashed in
+    session state so the Props page breakdown can show the
+    same form the scoring used.
+    """
+    if mode != "live":
+        return None
+    try:
+        store = game_logs.StatsStore(f"{DATA_DIR}/stats_cache")
+        nfl = store.nfl_logs()
+        nba = store.nba_logs()
+    except Exception:
+        return None
+    st.session_state["nfl_logs"] = nfl
+    st.session_state["nba_logs"] = nba
+    if nfl is None and nba is None:
+        return None
+    return game_logs.make_form_lookup(nfl, nba)
+
+
+def score_all(props, form_lookup=None):
     """Score props. Opposite-side odds are paired where both sides exist,
-    so the bookmaker's cut is taken out. No form data exists on the
-    free tier, so every pick is honestly labelled odds-only."""
+    so the bookmaker's cut is taken out. Where a real game-log feed
+    matched the player, recent form is blended in by the model and
+    the pick is labelled as having form data; everywhere else the
+    pick is honestly labelled odds-only."""
     by_line: dict = {}
     for p in props:
         by_line.setdefault((p.player, p.sport, p.prop, p.line), {})[p.side] = p.odds
@@ -261,7 +288,14 @@ def score_all(props):
     for p in props:
         pair = by_line.get((p.player, p.sport, p.prop, p.line), {})
         other_side = "Under" if p.side == "Over" else "Over"
-        scored.append(score_prop(p, pair_odds=pair.get(other_side)))
+        form = form_lookup(p) if form_lookup is not None else None
+        if form is not None:
+            scored.append(
+                score_prop(p, pair_odds=pair.get(other_side),
+                           recent_hits=form[0], recent_games=form[1])
+            )
+        else:
+            scored.append(score_prop(p, pair_odds=pair.get(other_side)))
     # Keep only Over picks + the best of each line to avoid mirror duplicates
     # in the pool: for each player/prop/line keep the higher-chance side.
     best: dict = {}
@@ -330,11 +364,15 @@ if "parlays" not in st.session_state:
     st.session_state["note"] = ""
 if "scored" not in st.session_state:
     st.session_state["scored"] = []
+if "raw_props" not in st.session_state:
+    st.session_state["raw_props"] = []
 
 
 def run_algorithm(force_refresh: bool = False):
     props, mode, note = load_props(force_refresh=force_refresh)
-    scored = score_all(props)
+    form_lookup = _form_lookup_for(mode)
+    scored = score_all(props, form_lookup=form_lookup)
+    st.session_state["raw_props"] = props
     parlays, build_notes = build_parlays(scored)
     st.session_state["parlays"] = parlays
     st.session_state["scored"] = scored
@@ -397,6 +435,119 @@ elif page == "Props":
     if not st.session_state["scored"]:
         st.write("No props loaded yet. Go to the Dashboard and tap **Run the algorithm**.")
     else:
+        scored = st.session_state["scored"]
+        parlays = st.session_state["parlays"]
+
+        # ----- Today's board at a glance -----
+        st.subheader("📊 Today's board at a glance")
+        st.write(
+            f"{len(scored)} props on the board, grouped by Lilly's chance. "
+            "Most props on any board live in the middle bands — that is normal."
+        )
+        band_rows = [
+            {"Chance band": label, "Props": count}
+            for label, count in breakdown.chance_bands(scored)
+        ]
+        st.bar_chart(band_rows, x="Chance band", y="Props")
+
+        # ----- Player breakdown -----
+        st.markdown("---")
+        st.subheader("🔍 Player breakdown")
+        st.write(
+            "Pick a player and Lilly breaks each of his props down: the price, "
+            "the bookmaker's cut, where it ranks today, and — where a real "
+            "game-log feed covers him — his recent form against the line."
+        )
+        players = sorted({p.player for p in scored})
+        chosen_player = st.selectbox("Pick a player", players, key="bd_player")
+        pairs = breakdown.pair_map(st.session_state["raw_props"] or [])
+        player_props = sorted(
+            (p for p in scored if p.player == chosen_player),
+            key=lambda p: p.probability,
+            reverse=True,
+        )
+        for pick in player_props:
+            logs = None
+            if pick.sport == "NFL":
+                logs = st.session_state.get("nfl_logs")
+            elif pick.sport == "NBA":
+                logs = st.session_state.get("nba_logs")
+            form = logs.form(pick.player, pick.prop, pick.side, pick.line) if logs else None
+            pair = pairs.get((pick.player, pick.sport, pick.prop, pick.line), {})
+            other_side = "Under" if pick.side == "Over" else "Over"
+            card = breakdown.build_breakdown(
+                pick, scored, parlays,
+                pair_odds=pair.get(other_side), form=form,
+            )
+            verdict, verdict_reason = lilly.verdict_for_pick(
+                pick.probability, pick.has_form_data, pick.edge
+            )
+            with st.expander(
+                f"{pick.label} — Lilly {card.lilly_chance:.0%} · {card.strength}",
+                expanded=(pick is player_props[0]),
+            ):
+                st.markdown(
+                    f"**{pick.event}** &nbsp;|&nbsp; {pick.sport} &nbsp;|&nbsp; "
+                    f"Line: **{pick.prop} {pick.side} {pick.line:g}**"
+                )
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Best odds", f"{pick.odds:+d}", help=pick.bookmaker or None)
+                m2.metric("Lilly's chance", f"{card.lilly_chance:.0%}")
+                m3.metric(
+                    "Gap vs book sticker",
+                    f"{card.edge_points:+.1f} pts",
+                    help="Lilly's chance minus the book's sticker chance. "
+                         "Mostly the bookmaker's cut coming out — see below.",
+                )
+                if pick.bookmaker:
+                    st.caption(f"Best price at {pick.bookmaker}.")
+                st.bar_chart(
+                    breakdown.chance_chart_rows(card.lilly_chance, card.book_chance),
+                    x="who", y="chance_pct",
+                )
+                st.markdown("**Why Lilly sees it this way:**")
+                for reason in card.reasons:
+                    st.markdown(f"- {reason}")
+                st.markdown(f"**Lilly's verdict: {verdict}** — {verdict_reason}")
+
+                # ----- Recent form (only when a real feed matched) -----
+                if form is not None and form.games > 0:
+                    st.markdown(f"#### Recent form — {form.source_label}")
+                    st.write(
+                        f"Went **{pick.side.lower()} {pick.line:g}** in "
+                        f"**{form.hits} of his last {form.games} games** · "
+                        f"Last 5 average: **{form.last5_avg:.1f}** · "
+                        f"Season average: **{form.season_avg:.1f}** · "
+                        f"The line: **{pick.line:g}**"
+                    )
+                    form_rows = breakdown.form_chart_rows(form.values)
+                    try:
+                        import altair as _alt
+                        import pandas as _pd
+
+                        _df = _pd.DataFrame(form_rows)
+                        _bars = _alt.Chart(_df).mark_bar(color="#7b2fbe").encode(
+                            x=_alt.X("game:N", sort=None, title="Recent games"),
+                            y=_alt.Y("value:Q", title=pick.prop),
+                        )
+                        _line = _alt.Chart(
+                            _pd.DataFrame({"line": [pick.line]})
+                        ).mark_rule(color="#e74c3c", strokeDash=[6, 4]).encode(y="line:Q")
+                        st.altair_chart(_bars + _line, use_container_width=True)
+                        st.caption("Red dashed line = the line this pick has to beat.")
+                    except Exception:
+                        st.bar_chart(form_rows, x="game", y="value")
+                        st.caption(f"The line this pick has to beat: {pick.line:g}.")
+                elif pick.source == "live":
+                    st.caption(
+                        "No recent-form feed matched this player yet — this pick "
+                        "is odds-only, and Lilly labels it that way rather than "
+                        "inventing stats."
+                    )
+
+        # ----- Full list -----
+        st.markdown("---")
+        st.subheader("All props")
         for pick in st.session_state["scored"]:
             verdict, _ = lilly.verdict_for_pick(pick.probability, pick.has_form_data, pick.edge)
             st.markdown(
@@ -627,7 +778,7 @@ elif page == "Setup":
         - **500 requests a month, free.** It resets on the 1st of the month.
         - Live player props for NBA and NFL (NHL later) from US sportsbooks.
         - **Player props cost quota per game** — that is why this app caches them for 6 hours and only refreshes when you tap Refresh. Do not tap Refresh over and over.
-        - **What it does NOT give you:** player game logs. The free game-log source (balldontlie) keeps those behind a paid tier, so until that is added, picks are **odds-only** and labelled that way. Lilly never invents a probability.
+        - **What the key does NOT give you:** player game logs — the API is odds only. Lilly gets recent form separately, from free feeds: nflverse for the NFL, and stats.nba.com for the NBA when that feed answers. Players no feed covers stay **odds-only** and are labelled that way. Lilly never invents a probability.
         """
     )
     if st.button("Check my key and quota"):

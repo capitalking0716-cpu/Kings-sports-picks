@@ -1,6 +1,12 @@
 """Recent-form data (player game logs) — honest status.
 
-Checked 2026-11-10:
+UPDATE 2026-11-12: free game-log feeds DO exist now and are
+wired in kings_picks/game_logs.py — nflverse for the NFL and
+stats.nba.com (via nba_api) for the NBA. That module is the
+live path. THIS module remains the older paid-balldontlie
+option, kept for if a paid key is ever added.
+
+Checked 2026-11-10 (about balldontlie specifically):
 
 - balldontlie.io DOES have per-game player stats, but on the
   CURRENT API they are a PAID endpoint (ALL-STAR tier and up).
@@ -8,7 +14,9 @@ Checked 2026-11-10:
   game logs, no season averages. There is no free game-log
   source that works right now. (Old blog posts saying it is
   keyless are out of date — the live API returns 401.)
-- There is no free NFL game-log API either.
+- At the time there was no free NFL game-log API in use either
+  (nflverse, found later, is a file feed, not an API — see
+  game_logs.py).
 
 So this module does ONE honest job: if Neko adds a paid
 balldontlie key (BALLDONTLIE_API_KEY), it fetches a player's

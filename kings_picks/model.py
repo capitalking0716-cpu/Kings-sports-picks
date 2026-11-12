@@ -7,12 +7,11 @@ Every number Lilly shows comes from one of two honest places:
    (the "vig") taken out of each Over/Under pair so the two sides
    add up to 100%.
 2. The player's recent games vs the same line — ONLY when a real
-   game-log source is available. Right now there is NO free
-   game-log source: balldontlie's free tier does not include
-   per-game player stats (that endpoint is paid). So until a
-   paid balldontlie key is added, every live pick is labelled
-   "odds-only, no recent-form data" and its chance is the
-   vig-free implied chance from the odds — never invented.
+   game-log source is available. Free feeds exist now (nflverse
+   for the NFL, stats.nba.com for the NBA — see game_logs.py),
+   but coverage is per-player: any pick no feed matched is
+   labelled "odds-only, no recent-form data" and its chance is
+   the vig-free implied chance from the odds — never invented.
 
 A probability is NEVER made up. If there is no data for it,
 Lilly says so.

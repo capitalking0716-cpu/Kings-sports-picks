@@ -2,3 +2,4 @@ streamlit>=1.30
 requests>=2.31
 pytest>=8.0
 extra-streamlit-components>=0.1.80
+nba_api>=1.4
