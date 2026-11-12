@@ -116,13 +116,24 @@ def test_ten_60_percent_picks_is_about_0_6_percent():
     assert overall_probability(picks) < 0.01  # tiny, even with the best picks
 
 
+def test_plan_is_the_new_shape():
+    # Neko's plan (2026-11-12): 4 of 2, 4 of 3, 2 of 5 —
+    # plus exactly ONE 10-pick per pull, for fun.
+    assert PARLAY_PLAN == [(2, 4), (3, 4), (5, 2), (10, 1)]
+
+
 def test_build_plan_counts():
     parlays, notes = build_parlays(make_scored(40))
     sizes = sorted(p.size for p in parlays)
-    assert sizes == [3, 3, 3, 5, 5, 5, 10, 10]
-    assert sum(1 for p in parlays if p.size == 10) == 2
-    assert sum(1 for p in parlays if p.size == 5) == 3
-    assert sum(1 for p in parlays if p.size == 3) == 3
+    assert sizes == [2, 2, 2, 2, 3, 3, 3, 3, 5, 5, 10]
+    assert sum(1 for p in parlays if p.size == 2) == 4
+    assert sum(1 for p in parlays if p.size == 3) == 4
+    assert sum(1 for p in parlays if p.size == 5) == 2
+    assert sum(1 for p in parlays if p.size == 10) == 1
+    # The single 10-pick is the for-fun ticket, and its
+    # card keeps the honest long-shot line.
+    ten = next(p for p in parlays if p.size == 10)
+    assert "Long shot" in ten.plain_summary()
 
 
 def test_build_picks_max_probability_combination():
@@ -159,14 +170,108 @@ def test_parlay_ev_math():
 
 
 def test_too_few_picks_builds_nothing_and_says_so():
-    parlays, notes = build_parlays(make_scored(2))
+    # The smallest ticket on the new plan is a 2-pick, so a
+    # one-pick pool builds nothing — and says so.
+    parlays, notes = build_parlays(make_scored(1))
     assert parlays == []
     assert notes  # a plain-words reason is returned
 
 
 def test_parlay_plain_summary_warns_on_ten():
+    # The plan's one for-fun 10-pick still carries the
+    # honest long-shot line on its card.
     parlays, _ = build_parlays(make_scored(12), plan=[(10, 1)])
     assert "long shot" in parlays[0].plain_summary().lower()
+
+
+def test_plain_summary_wording_for_the_new_sizes():
+    two, _ = build_parlays(make_scored(12), plan=[(2, 1)])
+    three, _ = build_parlays(make_scored(12), plan=[(3, 1)])
+    five, _ = build_parlays(make_scored(12), plan=[(5, 1)])
+    for parlay in (two[0], three[0], five[0]):
+        assert "steadiest of the three sizes" not in parlay.plain_summary()
+    assert "both picks have to land" in two[0].plain_summary()
+    assert "All three picks have to land" in three[0].plain_summary()
+    assert "All five picks have to land" in five[0].plain_summary()
+
+
+# ---------- test before picking (form-graded selection) ----------
+
+def _scored_with(player, prob):
+    s = score_prop(make_prop(player=player), pair_odds=-110)
+    s.probability = prob
+    return s
+
+
+def test_shaky_high_chance_leg_is_passed_over_for_lean():
+    # The highest-chance leg in the pool is form-weak
+    # (SHAKY); two lower-chance legs have their recent form
+    # behind them (LEAN). Test-before-picking: the 2-pick
+    # is built from the LEAN legs, not the SHAKY favourite.
+    hot = _scored_with("HotButShaky", 0.90)
+    lean_a = _scored_with("LeanA", 0.60)
+    lean_b = _scored_with("LeanB", 0.59)
+    verdicts = {hot.key: "SHAKY", lean_a.key: "LEAN", lean_b.key: "LEAN"}
+    parlays, notes = build_parlays(
+        [hot, lean_a, lean_b], plan=[(2, 1)], form_verdicts=verdicts
+    )
+    assert len(parlays) == 1
+    assert {p.key for p in parlays[0].picks} == {lean_a.key, lean_b.key}
+    # And no note claims a SHAKY leg had to be used.
+    assert not any("SHAKY" in n for n in notes)
+
+
+def test_strong_ranks_ahead_of_lean_ahead_of_mixed():
+    strong = _scored_with("Strong", 0.70)
+    lean = _scored_with("Lean", 0.70)
+    mixed = _scored_with("Mixed", 0.70)
+    verdicts = {strong.key: "STRONG", lean.key: "LEAN", mixed.key: "MIXED"}
+    parlays, _ = build_parlays(
+        [mixed, lean, strong], plan=[(2, 1)], form_verdicts=verdicts
+    )
+    assert {p.key for p in parlays[0].picks} == {strong.key, lean.key}
+
+
+def test_no_data_is_neutral_never_punished():
+    # A leg the logs don't cover (NO DATA, the best chance
+    # in the pool) is picked ahead of a MIXED leg on chance
+    # alone — same band — and is never treated like a
+    # form-weak leg: the 0.99 SHAKY leg is still passed over.
+    nodata = _scored_with("Unknown", 0.62)
+    mixed = _scored_with("Mixed", 0.61)
+    shaky = _scored_with("Shaky", 0.99)
+    verdicts = {nodata.key: "NO DATA", mixed.key: "MIXED", shaky.key: "SHAKY"}
+    parlays, _ = build_parlays(
+        [shaky, mixed, nodata], plan=[(2, 1)], form_verdicts=verdicts
+    )
+    assert {p.key for p in parlays[0].picks} == {nodata.key, mixed.key}
+
+
+def test_shaky_leg_is_used_when_the_pool_cannot_fill_without_it():
+    # Only two form-backed legs exist and the ticket needs
+    # three: the SHAKY leg tops it up — as a last resort,
+    # and the build notes say so out loud.
+    lean_a = _scored_with("LeanA", 0.60)
+    lean_b = _scored_with("LeanB", 0.59)
+    shaky = _scored_with("Shaky", 0.95)
+    verdicts = {lean_a.key: "LEAN", lean_b.key: "LEAN", shaky.key: "SHAKY"}
+    parlays, notes = build_parlays(
+        [lean_a, lean_b, shaky], plan=[(3, 1)], form_verdicts=verdicts
+    )
+    assert len(parlays) == 1
+    assert {p.key for p in parlays[0].picks} == {
+        lean_a.key, lean_b.key, shaky.key
+    }
+    assert any("SHAKY" in n for n in notes)
+
+
+def test_ungraded_pool_ranks_by_chance_as_before():
+    # No verdicts at all (the pre-test behaviour): pure
+    # probability order, the top of the pool fills first.
+    scored = make_scored(12)
+    parlays, _ = build_parlays(scored, plan=[(3, 1)])
+    best3 = sorted(scored, key=lambda p: p.probability, reverse=True)[:3]
+    assert {p.key for p in parlays[0].picks} == {p.key for p in best3}
 
 
 # ---------- Lilly ----------
@@ -255,12 +360,12 @@ def test_ledger_persists_across_reload(tmp_path):
 # ---------- full plan builds live ----------
 
 def test_full_plan_builds_and_records_live(tmp_path):
-    # The full 8-parlay plan from a live-scored board, and
+    # The full 11-parlay plan from a live-scored board, and
     # the ledger records the run as live. (Demo mode was
     # removed 2026-11-12 — the app only ever builds live.)
     scored = make_scored(30)
     parlays, _ = build_parlays(scored)
-    assert len(parlays) == 8
+    assert len(parlays) == 11
     ledger = Ledger(tmp_path / "ledger.json")
     ledger.record_run(parlays, "live")
     assert ledger.parlays[0].mode == "live"

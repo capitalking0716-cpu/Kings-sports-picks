@@ -427,6 +427,11 @@ def test_app_tickets_carry_every_field_standard_and_king(tmp_path, monkeypatch):
     assert "If all legs win, $1 staked returns $" in tickets
     assert "Expected value per $1:" in tickets
     assert "Long shot." in tickets  # the 10-pick honest line
+    # Every leg carries its form-test grade from the pull's
+    # test-before-picking pass (NO DATA here — the fixture
+    # stats store has no logs, which grades neutral).
+    assert "Form test:" in tickets
+    assert "NO DATA" in tickets
 
 
 def test_app_no_key_shows_the_setup_note_and_no_picks(tmp_path, monkeypatch):
@@ -563,3 +568,52 @@ def test_app_my_slip_summary_is_a_ticket(tmp_path, monkeypatch):
     assert not at.exception, f"app raised: {at.exception}"
     feedback = "\n".join(s.value for s in at.success)
     assert "Saved" in feedback and "already on it" in feedback
+
+
+# ---------- the new plan in the store (2026-11-12) ----------
+
+
+def test_store_round_trip_with_the_new_plan(tmp_path):
+    from collections import Counter
+
+    store = slate_store.SlateStore(tmp_path / "current_slate.json")
+    scored = [_scored(f"Fixture{i}", line=10.5 + i) for i in range(14)]
+    parlays, _ = build_parlays(scored)  # the default plan
+    assert Counter(p.size for p in parlays) == Counter({2: 4, 3: 4, 5: 2, 10: 1})
+    payload = slate_store.build_payload(
+        pulled_at=PULLED, note="new plan", raw_props=scored,
+        scored=scored, parlays=parlays, king_parlays=[], king_info={},
+    )
+    store.save(payload)
+    restored = slate_store.restore_slate(store.load())
+    assert restored is not None
+    assert [slate_store.parlay_to_dict(p) for p in restored["parlays"]] == payload["parlays"]
+    assert Counter(p.size for p in restored["parlays"]) == Counter(
+        {2: 4, 3: 4, 5: 2, 10: 1}
+    )
+    # The for-fun 10-pick keeps its honest footer line.
+    ten = next(p for p in restored["parlays"] if p.size == 10)
+    assert "Long shot" in ten.plain_summary()
+
+
+def test_app_renders_a_legacy_stored_slate_with_a_10_pick(tmp_path, monkeypatch):
+    # A slate stored by an older build — one holding a
+    # 10-pick parlay — must still load and render as-is:
+    # no crash, no silent rebuild, the ticket prints with
+    # its honest long-shot terms.
+    (tmp_path / "data").mkdir()
+    monkeypatch.chdir(tmp_path)
+    scored = [_scored(f"Fixture{i}", line=10.5 + i) for i in range(12)]
+    parlays, _ = build_parlays(scored, plan=[(10, 1), (3, 1)])
+    payload = slate_store.build_payload(
+        pulled_at=PULLED, note="legacy slate", raw_props=scored,
+        scored=scored, parlays=parlays, king_parlays=[], king_info={},
+    )
+    slate_store.SlateStore(tmp_path / "data" / "current_slate.json").save(payload)
+
+    at = _login_as_king(_run_app(FAKE_SECRETS))
+    tickets = "\n".join(_ticket_texts(at))
+    assert "10-pick parlay" in tickets
+    assert "Long shot." in tickets
+    assert "3-pick parlay" in tickets
+    assert [p.size for p in at.session_state["parlays"]] == [10, 3]

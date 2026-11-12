@@ -554,6 +554,29 @@ def _ticket_number(seed_text: str) -> str:
     return f"KSB-{digest[:8].upper()}"
 
 
+def _form_test_html(pick) -> str:
+    """The per-leg form-test line on a bet ticket: the grade
+    the pull's test-before-picking pass gave this leg at
+    selection time (kings_picks/self_test.py), with its
+    last-10 record. Legs that were never graded (hand-built
+    slip legs, slates stored before the test existed) print
+    nothing — the ticket never invents a grade."""
+    verdict = getattr(pick, "form_verdict", "") or ""
+    if not verdict:
+        return ""
+    display = self_test.VERDICT_DISPLAY.get(verdict, verdict)
+    if verdict == self_test.NO_DATA:
+        detail = "no game log covers this pick"
+    elif getattr(pick, "form_record", ""):
+        detail = f"last-10 form {pick.form_record}"
+    else:
+        detail = ""
+    text = f"🧪 Form test: <b>{display}</b>"
+    if detail:
+        text += f" — {detail}"
+    return text + "<br>"
+
+
 def render_parlay(parlay, mode: str):
     """One parlay as an authentic bet ticket.
 
@@ -598,6 +621,7 @@ def render_parlay(parlay, mode: str):
             f"Odds: {pick.odds:+d} &nbsp;|&nbsp; Chance: <b>{pick.probability:.0%}</b> &nbsp;|&nbsp; "
             f"{pick.bookmaker or ''} &nbsp;|&nbsp; {pick.event}<br>"
             f"{odds_only}<br>"
+            f"{_form_test_html(pick)}"
             f"{king_html}"
             f"<i>{pick.why}</i><br>"
             f"<b>Lilly's verdict: {verdict}</b> — {reason}"
@@ -651,7 +675,8 @@ def _render_slip_ticket(legs, summary, profile):
             f"<b>{leg.label}</b> — {leg.sport}<br>"
             f"Odds: {leg.odds:+d} &nbsp;|&nbsp; Lilly's chance: <b>{leg.probability:.0%}</b> &nbsp;|&nbsp; "
             f"{leg.bookmaker or ''} &nbsp;|&nbsp; {leg.event}<br>"
-            f"{form_tag}"
+            f"{form_tag}<br>"
+            f"{_form_test_html(leg)}"
             f"</div>"
         )
     american = (
@@ -841,6 +866,64 @@ if "pulled_at" not in st.session_state:
     _apply_stored_slate(SLATE_STORE.load())
 
 
+def _grade_scored_legs(scored) -> dict:
+    """Test before picking (Neko's order, 2026-11-12).
+
+    Grade every scored candidate leg at the line it would
+    play, against the player's game-log form
+    (kings_picks/self_test.py — zero Odds API quota, the
+    logs are already loaded for the run). The grade is
+    stamped on the pick (it is the grade the bet ticket
+    shows) and the {pick key: verdict} map is returned for
+    the parlay builder, which ranks form-backed legs first
+    and keeps SHAKY legs as a last resort
+    (kings_picks/parlays.py). Fail-soft: no logs means
+    every grade reads NO DATA, which the builder treats as
+    neutral — a pull never dies because a feed didn't load.
+    """
+    logs_by_sport = _self_test_logs()
+    verdicts: dict = {}
+    for pick in scored:
+        grade = self_test.grade_pick(
+            pick.player,
+            pick.prop,
+            pick.side,
+            pick.line,
+            logs_by_sport.get(pick.sport),
+        )
+        pick.form_verdict = grade.verdict
+        pick.form_record = grade.form_label
+        verdicts[pick.key] = grade.verdict
+    return verdicts
+
+
+def _grade_king_legs(king_parlays) -> None:
+    """Grade the 👑 King legs at the lines they PLAY.
+
+    A King leg's own line IS its played line — the dropped
+    line for a dropped leg, the standard line for a kept
+    one — so grading each finished King leg at leg.line is
+    grading it exactly where it plays. The grades stamp the
+    King tickets the same way the standard tickets are
+    stamped. Selection itself already happened in the
+    standard build (the King set mirrors it leg for leg);
+    these grades are the record of how each dropped leg's
+    form reads at its dropped line.
+    """
+    logs_by_sport = _self_test_logs()
+    for parlay in king_parlays:
+        for leg in parlay.picks:
+            grade = self_test.grade_pick(
+                leg.player,
+                leg.prop,
+                leg.side,
+                leg.line,
+                logs_by_sport.get(leg.sport),
+            )
+            leg.form_verdict = grade.verdict
+            leg.form_record = grade.form_label
+
+
 def run_algorithm(force_refresh: bool = False):
     props, mode, note = load_props(force_refresh=force_refresh)
     if mode != "live":
@@ -871,7 +954,12 @@ def run_algorithm(force_refresh: bool = False):
         props, form_lookup=form_lookup, learning_lookup=learning_lookup
     )
     st.session_state["raw_props"] = props
-    parlays, build_notes = build_parlays(scored)
+    # Test before picking: grade every candidate leg
+    # against its game-log form FIRST, then build — the
+    # builder ranks form-backed legs ahead and keeps
+    # form-weak legs as a last resort.
+    form_verdicts = _grade_scored_legs(scored)
+    parlays, build_notes = build_parlays(scored, form_verdicts=form_verdicts)
     st.session_state["parlays"] = parlays
     st.session_state["scored"] = scored
     st.session_state["mode"] = mode
@@ -902,6 +990,9 @@ def run_algorithm(force_refresh: bool = False):
             form_lookup=form_lookup,
             learning_lookup=learning_lookup,
         )
+        # King legs graded at the lines they play (the
+        # dropped lines), stamped for their tickets.
+        _grade_king_legs(king_parlays)
         st.session_state["note"] += (
             f" | 👑 King style: {king_info['legs_dropped']} legs dropped, "
             f"{king_info['legs_kept_standard']} kept standard — dropped lines "

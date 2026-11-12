@@ -146,6 +146,19 @@ class ScoredProp(Prop):
     """A Prop with its probability and plain-words reason attached."""
 
     why: str = ""
+    # Filled in by the live pull's test-before-picking step:
+    # before the parlays are built, every candidate leg is
+    # graded against the player's game-log form
+    # (kings_picks/self_test.py) at the line it would play,
+    # and the parlay builder ranks by this verdict. The
+    # verdict that ranked the leg at selection time
+    # ("STRONG" / "LEAN" / "MIXED" / "SHAKY" / "NO DATA")
+    # and its last-10 record ("7/10", pushes named) ride on
+    # the pick so the bet ticket can show them. "" when the
+    # leg was never graded (hand-built slip legs, slates
+    # stored before this step existed).
+    form_verdict: str = ""
+    form_record: str = ""
 
 
 def _projection_note(

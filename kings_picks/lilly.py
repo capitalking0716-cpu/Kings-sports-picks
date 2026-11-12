@@ -38,10 +38,18 @@ promise you a win — nobody honest can.
    in a raw "how often did he clear the line lately" rate —
    I tested it against my projection on nearly 11,000 real
    past games, the old way lost, and I retired it.)
-3. I build your parlays from the highest-chance picks, and I
-   show the TRUE overall chance of each parlay. A 10-pick
-   parlay is a long shot even when it is the best one possible
-   — ten 60% picks together win about 0.6 times out of 100.
+3. Before I pick a single leg, I test it: in the player's
+   last 10 logged games, how many times would this exact
+   pick have hit? Legs whose form backs them get picked
+   first; a leg whose recent form is weak only makes a
+   ticket when nothing else can fill it. Then I build
+   your parlays — 4 of 2 picks, 4 of 3 picks, 2 of 5
+   picks, plus one 10-pick per pull, for fun — and I
+   show the TRUE overall chance of each parlay. Even a
+   5-pick parlay is no sure thing: five 60% picks
+   together win only about 8 times out of 100. The
+   10-pick is worse — it is a lottery ticket, and its
+   card says so.
 
 **King's style leads:**
 King bets his way: take the number a player is known for,
@@ -60,8 +68,10 @@ promise from me.
   never moves money.
 - A pick is a chance, never a sure thing. If I say a pick is
   bad, listen — I hate losing money more than I like winning it.
-- The 3-pick parlays are the steadiest. The 10-picks are fun
-  to track, not a plan to make steady money.
+- The 2-pick parlays are the steadiest. The 5-picks pay
+  more and miss more. And there is exactly one 10-pick
+  per pull — King's for-fun ticket. It is a long shot
+  and it knows it; never a plan to make steady money.
 
 **I learn from my record:**
 Every pick I make is logged, and the ones that settle teach
@@ -131,17 +141,20 @@ def chat_reply(message: str) -> str:
     if any(w in text for w in ("run", "algorithm", "build", "parlay")):
         return (
             "Hit the big purple **Run the algorithm** button on this page and "
-            "I will build your 8 parlays — 2 of ten picks, 3 of five, 3 of three — "
-            "from the highest-chance picks I have. I will show the true overall "
-            "chance of each one. The 10-picks are long shots even when they are "
-            "the best possible — that is just the math, and I will not hide it."
+            "I will build your 11 parlays — 4 of two picks, 4 of three, 2 of "
+            "five, plus one 10-pick for fun. Before I pick, I test every leg "
+            "against the player's last 10 games, and legs whose form backs "
+            "them go in first. I will show the true overall chance of each "
+            "one. The 10-pick is a long shot even when it is the best "
+            "possible — that is just the math, and I will not hide it."
         )
     if "10" in text or "ten" in text:
         return (
             "Ten picks that each win 60% of the time only win together about "
-            "0.6 times out of 100. That is 1 in about 166. I build the best "
-            "10-pick I can, but I want you to know it is a long shot before "
-            "you track it. The 3-picks are the steadier ones."
+            "0.6 times out of 100. That is 1 in about 166. I build exactly "
+            "one 10-pick per pull — King's for-fun ticket — and I want you "
+            "to know it is a long shot before you track it. The 2-picks are "
+            "the steadier ones."
         )
     if any(w in text for w in ("win", "guarantee", "sure", "lock", "promise")):
         return (
@@ -152,7 +165,7 @@ def chat_reply(message: str) -> str:
         )
     if any(w in text for w in ("safe", "safest", "best")):
         return (
-            "The safest thing I build is the 3-pick parlay with the highest "
+            "The safest thing I build is the 2-pick parlay with the highest "
             "overall chance. Look for the one with the biggest chance on the "
             "Dashboard. Even that one can lose — safest does not mean safe."
         )
@@ -184,7 +197,7 @@ def chat_reply(message: str) -> str:
     if any(w in text for w in ("hi", "hello", "hey", "who are you")):
         return (
             "Hey — I'm Lilly. I run the picks here. Ask me how the algorithm "
-            "works, what a 10-pick parlay really means, or hit 'Run the "
+            "works, why I test every leg before I pick it, or hit 'Run the "
             "algorithm' and I will build today's parlays for you. No promises, "
             "just honest chances."
         )

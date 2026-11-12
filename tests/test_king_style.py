@@ -469,3 +469,26 @@ def test_app_without_key_builds_nothing_and_says_why():
         "Add your Odds API key in Streamlit Secrets to pull live props."
         in infos
     )
+
+
+def test_king_set_mirrors_the_new_plan_counts():
+    # Neko's plan (2026-11-12): 4x 2-pick, 4x 3-pick,
+    # 2x 5-pick, plus exactly ONE 10-pick per pull — and
+    # the 👑 King set mirrors the standard set 1:1, same
+    # sizes in the same order, the 10-pick included.
+    from collections import Counter
+
+    pool = []
+    for i in range(14):
+        p = Prop(player=f"Mirror{i}", sport="NBA", prop="Points",
+                 side="Over", line=10.5 + i, odds=-110,
+                 bookmaker="Test Book", event="A vs B", event_id="ev1")
+        pool.append(score_prop(p, pair_odds=-110))
+    parlays, _ = build_parlays(pool)
+    assert Counter(p.size for p in parlays) == Counter({2: 4, 3: 4, 5: 2, 10: 1})
+
+    king, _info = king_style.build_king_parlays(parlays, FakeFetcher())
+    assert [k.size for k in king] == [p.size for p in parlays]
+    assert Counter(k.size for k in king) == Counter({2: 4, 3: 4, 5: 2, 10: 1})
+    assert all(k.style == "king" for k in king)
+    assert sum(1 for k in king if k.size == 10) == 1
