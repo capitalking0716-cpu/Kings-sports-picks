@@ -38,6 +38,13 @@ PROFILE_LABELS: dict[str, str] = {
     "Kohen": "Kohen",
 }
 
+# "Remember this phone": after a successful PIN login the app may
+# store ONE cookie on that device. Its value is only ever a profile
+# name ("King" / "Kohen") — never the PIN, never anything else.
+# A phone with this cookie reopens straight into that profile;
+# logging out deletes the cookie (the phone forgets).
+COOKIE_NAME = "ksp_profile"
+
 
 def _clean(value) -> str:
     """Coerce a secret / entered value to a stripped string."""
@@ -111,3 +118,24 @@ def entry_profile(entry) -> str:
     else:
         raw = getattr(entry, "profile", None)
     return normalize_profile(raw)
+
+
+def profile_from_cookie(value, secrets) -> str | None:
+    """The profile a remember-me cookie value names, or None.
+
+    The cookie is trusted only when ALL of these hold:
+    - profiles are fully configured (both PINs set in secrets) —
+      a cookie can never become a way around an unconfigured app;
+    - the value is exactly a known profile name ("King" / "Kohen",
+      case-sensitive) after stripping stray whitespace.
+
+    Anything else — missing cookie, empty value, an unknown or
+    misspelled name, junk — returns None and the PIN gate applies.
+    The cookie never carries a PIN, so this grants nothing the
+    profile's own login would not: switching to the OTHER profile
+    still needs that profile's PIN (logout clears the cookie).
+    """
+    if not profiles_configured(secrets):
+        return None
+    name = _clean(value)
+    return name if name in PROFILES else None

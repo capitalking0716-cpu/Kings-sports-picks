@@ -274,3 +274,35 @@ def test_app_kohen_login_uses_kohen_profile():
     assert at.session_state["active_profile"] == "Kohen"
     sidebar_text = "\n".join(m.value for m in at.sidebar.markdown)
     assert "Signed in as Kohen" in sidebar_text
+
+
+# ---------- remember-me cookie: profile_from_cookie ----------
+
+def test_cookie_name_is_ksp_profile():
+    # The cookie holds ONLY a profile name — never a PIN.
+    assert profiles.COOKIE_NAME == "ksp_profile"
+
+
+def test_profile_from_cookie_valid():
+    assert profiles.profile_from_cookie("King", FAKE_SECRETS) == "King"
+    assert profiles.profile_from_cookie("Kohen", FAKE_SECRETS) == "Kohen"
+    # Stray whitespace from the browser is tolerated.
+    assert profiles.profile_from_cookie("  King  ", FAKE_SECRETS) == "King"
+
+
+@pytest.mark.parametrize("junk", [
+    "Neko", "king", "KING", "kohen", "", "   ", "King Kohen",
+    "King|Kohen", "1111", "👑 King", None, 0, 1234, ["King"], {"p": "King"},
+])
+def test_profile_from_cookie_rejects_junk(junk):
+    assert profiles.profile_from_cookie(junk, FAKE_SECRETS) is None
+
+
+def test_profile_from_cookie_needs_configured_profiles():
+    # A cookie is never a way around an unconfigured app: with
+    # either PIN missing from secrets, the cookie grants nothing.
+    assert profiles.profile_from_cookie("King", {}) is None
+    assert profiles.profile_from_cookie("King", None) is None
+    assert profiles.profile_from_cookie("King", {"KING_PIN": "1111"}) is None
+    assert profiles.profile_from_cookie("Kohen", {"KOHEN_PIN": "2222"}) is None
+    assert profiles.profile_from_cookie("King", {"KING_PIN": "", "KOHEN_PIN": "2222"}) is None

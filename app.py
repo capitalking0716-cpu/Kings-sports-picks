@@ -4,6 +4,12 @@ Local only. Paper tracking only. No real bets, no money moved.
 Lilly never promises wins.
 """
 
+import csv
+import io
+import json
+from dataclasses import asdict
+from datetime import datetime, timedelta
+
 import streamlit as st
 
 from kings_picks import demo_data, lilly, profiles
@@ -11,6 +17,7 @@ from kings_picks.ledger import Ledger
 from kings_picks.model import score_prop
 from kings_picks.odds_api import OddsApiClient
 from kings_picks.parlays import build_parlays
+from kings_picks.pick_log import PickLog
 
 st.set_page_config(
     page_title="Kings Sports Books Picks",
@@ -91,9 +98,91 @@ if not profiles.profiles_configured(SECRETS):
     )
     st.stop()
 
+# ---- Remember this phone (browser cookie) ----
+# After a successful PIN login, this phone may store ONE cookie
+# whose value is only the profile name ("King" / "Kohen") — never
+# the PIN. A phone with that cookie reopens straight into its
+# profile. Logging out deletes the cookie: the phone forgets, and
+# the next visit needs a PIN again. Switching to the OTHER
+# profile always needs that profile's PIN.
+#
+# The cookie component is guarded: if extra-streamlit-components
+# is unavailable or anything about the cookie fails, remember-me
+# silently turns off and the PIN gate works exactly as before.
+try:
+    import extra_streamlit_components as _stx
+except ImportError:
+    _stx = None
+
+
+def _make_cookie_manager():
+    if _stx is None:
+        return None
+    try:
+        return _stx.CookieManager(key="ksp_cookie_manager")
+    except Exception:
+        return None
+
+
+COOKIE_MANAGER = _make_cookie_manager()
+
+
+def _remembered_profile():
+    """The profile this phone remembers, or None.
+
+    Cookie reads on Streamlit reruns are finicky — a missing or
+    failed read simply means "show the PIN gate", never an error.
+    """
+    if COOKIE_MANAGER is None:
+        return None
+    try:
+        getter = getattr(COOKIE_MANAGER, "get_all", None) or getattr(
+            COOKIE_MANAGER, "getAll", None
+        )
+        cookies = getter() or {}
+    except Exception:
+        return None
+    if not isinstance(cookies, dict):
+        return None
+    return profiles.profile_from_cookie(cookies.get(profiles.COOKIE_NAME), SECRETS)
+
+
+def _remember_this_phone(profile: str) -> None:
+    """Store the profile-name cookie on this phone for a year."""
+    if COOKIE_MANAGER is None:
+        return
+    try:
+        COOKIE_MANAGER.set(
+            profiles.COOKIE_NAME,
+            profile,
+            expires_at=datetime.now() + timedelta(days=365),
+            key="ksp_set_profile_cookie",
+        )
+        st.session_state["via_cookie"] = True
+    except Exception:
+        pass
+
+
+def _forget_this_phone() -> None:
+    """Delete the remember-me cookie — this phone forgets."""
+    if COOKIE_MANAGER is None:
+        return
+    try:
+        COOKIE_MANAGER.delete(profiles.COOKIE_NAME, key="ksp_delete_profile_cookie")
+    except Exception:
+        pass
+
+
 active_profile = st.session_state.get("active_profile")
 if active_profile not in profiles.PROFILES:
     active_profile = None
+
+if active_profile is None:
+    remembered = _remembered_profile()
+    if remembered is not None:
+        st.session_state["active_profile"] = remembered
+        st.session_state["via_cookie"] = True
+        active_profile = remembered
 
 if active_profile is None:
     st.title("👑 Kings Sports Books Picks")
@@ -120,6 +209,7 @@ if active_profile is None:
             if profiles.verify_pin(pending_profile, pin_entry, SECRETS):
                 st.session_state["active_profile"] = pending_profile
                 st.session_state.pop("pending_profile", None)
+                _remember_this_phone(pending_profile)
                 st.rerun()
             else:
                 st.error("❌ Wrong PIN — it has to be exactly the 4 digits. Try again.")
@@ -130,6 +220,7 @@ if active_profile is None:
 
 DATA_DIR = "data"
 LEDGER = Ledger(f"{DATA_DIR}/ledger.json")
+PICK_LOG = PickLog(f"{DATA_DIR}/pick_log.json")
 
 
 def get_client() -> OddsApiClient:
@@ -210,9 +301,16 @@ def render_parlay(parlay, mode: str):
 st.sidebar.title("👑 Kings Picks")
 st.sidebar.markdown("**Neko's own picks platform.** Paper tracking only — no real bets, no money moved.")
 st.sidebar.markdown(f"### Signed in as {profiles.PROFILE_LABELS[active_profile]}")
+if st.session_state.get("via_cookie"):
+    st.sidebar.markdown(
+        "📱 **This phone remembers you** — no PIN needed on this phone. "
+        "Log out and this phone forgets you."
+    )
 if st.sidebar.button("Log out / switch profile", key="logout"):
+    _forget_this_phone()
     st.session_state.pop("active_profile", None)
     st.session_state.pop("pending_profile", None)
+    st.session_state.pop("via_cookie", None)
     st.rerun()
 page = st.sidebar.radio(
     "Go to",
@@ -244,6 +342,7 @@ def run_algorithm(force_refresh: bool = False):
     st.session_state["note"] = note + (" | " + " | ".join(build_notes) if build_notes else "")
     if parlays:
         LEDGER.record_run(parlays, mode, profile=active_profile)
+        PICK_LOG.record_run(parlays, mode)
     return parlays, mode, note
 
 
@@ -366,6 +465,138 @@ elif page == "Results / Ledger":
                 if c3.button("❌ Lost", key=f"l-{lp.id}-{pick['key']}"):
                     LEDGER.settle_pick(lp.id, pick["key"], False)
                     st.rerun()
+
+    # ---------- Pick log: every pick, played or not ----------
+    st.markdown("---")
+    st.subheader("🎯 Pick log — every pick Lilly makes")
+    st.write(
+        "Every leg of every parlay, logged on its own and tracked **whether anyone "
+        "played it or not**. Settlement is by hand — no free feed has final player "
+        "stats, so after the games you tap Won or Lost here. Lilly never guesses a result."
+    )
+    pstats = PICK_LOG.stats(profile=active_profile)
+    pc1, pc2, pc3, pc4 = st.columns(4)
+    pc1.metric("Picks logged", pstats["total"])
+    pc2.metric("Settled", pstats["settled"])
+    pc3.metric("Pick hit rate", f"{pstats['hit_rate']:.0%}" if pstats["hit_rate"] is not None else "—")
+    played = pstats["played"]
+    pc4.metric(
+        "Your played record",
+        f"{played['won']} of {played['settled']}" if played["settled"] else "—",
+    )
+    if played["hit_rate"] is not None:
+        st.caption(
+            f"Your played picks hit rate: {played['hit_rate']:.0%} "
+            f"({played['settled']} played picks settled)."
+        )
+    if pstats["demo"]["total"]:
+        st.caption(
+            f"Demo picks are kept out of the record above: {pstats['demo']['total']} demo "
+            f"picks logged, {pstats['demo']['settled']} settled. Demo never counts as a real record."
+        )
+
+    open_entries = PICK_LOG.open_picks()
+    st.markdown("#### Open picks — settle them after the games")
+    if not open_entries:
+        st.write("No open picks. Run the algorithm and every pick she makes lands here.")
+    open_dates = sorted({e.date for e in open_entries}, reverse=True)
+    for group_date in open_dates:
+        group = [e for e in open_entries if e.date == group_date]
+        with st.expander(f"{group_date} — {len(group)} open picks", expanded=(group_date == open_dates[0])):
+            for entry in group:
+                demo_tag = " · DEMO" if entry.mode == "demo" else ""
+                i_played = active_profile in entry.played_by
+                st.markdown(
+                    f"<div class='pick-card'>"
+                    f"<b style='font-size:17px'>{entry.label}</b> — {entry.sport}{demo_tag}<br>"
+                    f"{entry.event} &nbsp;|&nbsp; Odds: {entry.odds:+d} &nbsp;|&nbsp; "
+                    f"Chance: <b>{entry.probability:.0%}</b>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+                b1, b2, b3 = st.columns(3)
+                if b1.button("✅ Won", key=f"pl-won-{entry.key}"):
+                    PICK_LOG.settle(entry.key, True)
+                    st.rerun()
+                if b2.button("❌ Lost", key=f"pl-lost-{entry.key}"):
+                    PICK_LOG.settle(entry.key, False)
+                    st.rerun()
+                played_label = "✅ You played this — tap to undo" if i_played else "🎟️ I played this"
+                if b3.button(played_label, key=f"pl-played-{entry.key}"):
+                    PICK_LOG.toggle_played(entry.key, active_profile)
+                    st.rerun()
+
+    settled_entries = PICK_LOG.settled_picks()
+    if settled_entries:
+        with st.expander(f"Settled picks — {len(settled_entries)} done"):
+            for entry in settled_entries[:30]:
+                mark = "✅ Won" if entry.status == "won" else "❌ Lost"
+                demo_tag = " · DEMO" if entry.mode == "demo" else ""
+                played_note = (
+                    f" · played by {', '.join(entry.played_by)}" if entry.played_by else ""
+                )
+                st.write(
+                    f"{mark} — **{entry.label}** — {entry.event} · {entry.date}{demo_tag}{played_note}"
+                )
+            if len(settled_entries) > 30:
+                st.caption(f"Showing the newest 30 of {len(settled_entries)} settled picks.")
+
+    # ---------- Backup export ----------
+    st.markdown("---")
+    st.subheader("⬇️ Back up your records")
+    st.write(
+        "The app's files can be reset when the app rebuilds. Download a copy of your "
+        "records now and then — these buttons are the safety net."
+    )
+    today_str = datetime.now().date().isoformat()
+    pick_rows = PICK_LOG.rows()
+    pick_csv = ""
+    if pick_rows:
+        buf = io.StringIO()
+        writer = csv.DictWriter(buf, fieldnames=list(pick_rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(pick_rows)
+        pick_csv = buf.getvalue()
+    ledger_rows = [
+        {
+            "id": lp.id, "date": lp.date, "size": lp.size, "label": lp.label,
+            "overall_probability": lp.overall_probability, "mode": lp.mode,
+            "profile": lp.profile, "settled": lp.settled,
+            "picks_won": lp.picks_won, "picks_lost": lp.picks_lost,
+            "picks_pending": lp.picks_pending,
+        }
+        for lp in LEDGER.parlays
+    ]
+    ledger_csv = ""
+    if ledger_rows:
+        buf = io.StringIO()
+        writer = csv.DictWriter(buf, fieldnames=list(ledger_rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(ledger_rows)
+        ledger_csv = buf.getvalue()
+    dl1, dl2 = st.columns(2)
+    dl1.download_button(
+        "⬇️ Pick log — JSON", data=PICK_LOG.to_json(),
+        file_name=f"pick-log-{today_str}.json", mime="application/json",
+        key="dl-picklog-json",
+    )
+    dl2.download_button(
+        "⬇️ Pick log — CSV", data=pick_csv,
+        file_name=f"pick-log-{today_str}.csv", mime="text/csv",
+        key="dl-picklog-csv",
+    )
+    dl3, dl4 = st.columns(2)
+    dl3.download_button(
+        "⬇️ Parlay ledger — JSON",
+        data=json.dumps([asdict(lp) for lp in LEDGER.parlays], indent=2),
+        file_name=f"parlay-ledger-{today_str}.json", mime="application/json",
+        key="dl-ledger-json",
+    )
+    dl4.download_button(
+        "⬇️ Parlay ledger — CSV", data=ledger_csv,
+        file_name=f"parlay-ledger-{today_str}.csv", mime="text/csv",
+        key="dl-ledger-csv",
+    )
 
 # ================= SETUP =================
 elif page == "Setup":
