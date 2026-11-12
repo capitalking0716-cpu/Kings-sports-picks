@@ -204,6 +204,161 @@ def test_store_caches_to_disk_and_reuses(tmp_path):
     assert calls["n"] == 1
 
 
+# ---------- positions (browsing only — scoring never reads them) ----------
+
+def test_nflverse_positions_from_the_feeds_own_column():
+    positions = game_logs.parse_nflverse_positions(NFL_CSV)
+    assert positions == {
+        "patrick mahomes": "QB",
+        "luther burden": "WR",
+        "michael penix": "QB",
+        "joe blank": "WR",
+    }
+
+
+# A player the feed lists at different positions across weeks;
+# rows deliberately out of order, plus a POST row that must not
+# count and a blank cell on the latest week.
+NFL_POSITIONS_CSV = "\n".join([
+    NFL_HEADER,
+    "00-9,H.Hybrid,Hybrid Player,WR,2026,3,REG,0,0,0,0,0,0,0",
+    "00-9,H.Hybrid,Hybrid Player,RB,2026,1,REG,0,0,0,0,0,0,0",
+    "00-9,H.Hybrid,Hybrid Player,TE,2026,19,POST,0,0,0,0,0,0,0",
+    "00-8,B.Blank,Blank Latest,QB,2026,1,REG,0,0,0,0,0,0,0",
+    "00-8,B.Blank,Blank Latest,,2026,4,REG,0,0,0,0,0,0,0",
+    "00-7,N.Never,Never Stated,,2026,2,REG,0,0,0,0,0,0,0",
+])
+
+
+def test_nflverse_positions_most_recent_stated_week_wins():
+    positions = game_logs.parse_nflverse_positions(NFL_POSITIONS_CSV)
+    # Week 3 WR beats week 1 RB; the POST week's TE is ignored.
+    assert positions["hybrid player"] == "WR"
+    # A blank on the latest week never erases a stated position.
+    assert positions["blank latest"] == "QB"
+    # Never stated anywhere -> absent, not invented.
+    assert "never stated" not in positions
+
+
+def test_gamelogs_position_of_lookup():
+    logs = GameLogs(
+        sport="NFL",
+        by_player=game_logs.parse_nflverse_csv(NFL_CSV),
+        source_label=game_logs.NFL_SOURCE,
+        season_label="2026",
+        positions=game_logs.parse_nflverse_positions(NFL_CSV),
+    )
+    assert logs.position_of("Patrick Mahomes") == "QB"
+    assert logs.position_of("Michael Penix Jr.") == "QB"  # suffix-safe
+    assert logs.position_of("Nobody Here") is None
+
+
+def test_expand_nba_position_codes_to_words():
+    assert game_logs.expand_nba_position("G") == "Guard"
+    assert game_logs.expand_nba_position("F") == "Forward"
+    assert game_logs.expand_nba_position("C") == "Center"
+    assert game_logs.expand_nba_position("G-F") == "Guard-Forward"
+    assert game_logs.expand_nba_position("F-C") == "Forward-Center"
+    assert game_logs.expand_nba_position("C-F") == "Center-Forward"
+    assert game_logs.expand_nba_position("") == ""
+    assert game_logs.expand_nba_position(None) == ""
+
+
+NBA_INDEX_ROWS = [
+    {"PLAYER_FIRST_NAME": "LeBron", "PLAYER_LAST_NAME": "James", "POSITION": "F"},
+    {"PLAYER_FIRST_NAME": "Bam", "PLAYER_LAST_NAME": "Adebayo", "POSITION": "C-F"},
+    {"PLAYER_FIRST_NAME": "Darius", "PLAYER_LAST_NAME": "Acuff Jr.", "POSITION": "G"},
+    {"PLAYER_FIRST_NAME": "No", "PLAYER_LAST_NAME": "Position", "POSITION": ""},
+    {"PLAYER_FIRST_NAME": "", "PLAYER_LAST_NAME": "", "POSITION": "G"},
+]
+
+
+def test_nba_player_index_rows_parse_positions():
+    positions = game_logs.parse_nba_player_index_rows(NBA_INDEX_ROWS)
+    assert positions == {
+        "lebron james": "Forward",
+        "bam adebayo": "Center-Forward",
+        "darius acuff": "Guard",  # suffix in the last name normalizes away
+    }
+
+
+def test_store_positions_survive_the_disk_cache(tmp_path):
+    class _OkSession:
+        def get(self, url, timeout=None):
+            class R:
+                status_code = 200
+                text = NFL_CSV
+
+            return R()
+
+    first = StatsStore(tmp_path, session=_OkSession(), today=date(2026, 11, 12))
+    assert first.nfl_logs().position_of("Patrick Mahomes") == "QB"
+    # Fresh store, dead network: positions ride the disk cache too.
+    second = StatsStore(tmp_path, session=_BoomSession(), today=date(2026, 11, 12))
+    cached = second.nfl_logs()
+    assert cached is not None
+    assert cached.position_of("Luther Burden") == "WR"
+
+
+def test_store_ignores_pre_positions_v1_cache(tmp_path):
+    import json
+    import time as _time
+
+    # A fresh, unexpired v1 cache file (logs only, written by the
+    # pre-positions build) must NOT be served — the store has to
+    # hit the (dead) network instead of showing a position-less
+    # week from a stale file.
+    (tmp_path / "nflverse_2026.json").write_text(json.dumps({
+        "fetched_at": _time.time(),
+        "season": 2026,
+        "logs": {"patrick mahomes": {"Passing Yards": [1.0]}},
+    }))
+    store = StatsStore(tmp_path, session=_BoomSession(), today=date(2026, 11, 12))
+    assert store.nfl_logs() is None
+
+
+def _write_nba_caches(tmp_path, with_positions=True):
+    import json
+    import time as _time
+
+    (tmp_path / "nba_gamelogs.json").write_text(json.dumps({
+        "fetched_at": _time.time(),
+        "season": "2026-27",
+        "logs": game_logs.parse_nba_game_log_rows(NBA_ROWS),
+    }))
+    if with_positions:
+        (tmp_path / "nba_positions.json").write_text(json.dumps({
+            "fetched_at": _time.time(),
+            "season": "2026-27",
+            "positions": {"lebron james": "Forward"},
+        }))
+
+
+def test_store_nba_positions_come_from_their_own_cache(tmp_path):
+    _write_nba_caches(tmp_path, with_positions=True)
+    # BoomSession proves no network is touched on the cache path.
+    store = StatsStore(tmp_path, session=_BoomSession(), today=date(2026, 11, 12))
+    logs = store.nba_logs()
+    assert logs is not None
+    assert logs.position_of("LeBron James") == "Forward"
+
+
+def test_store_nba_logs_survive_when_positions_unavailable(tmp_path):
+    _write_nba_caches(tmp_path, with_positions=False)
+
+    class _NoPositionsStore(StatsStore):
+        def _fetch_nba_positions(self, season):
+            return None
+
+    store = _NoPositionsStore(
+        tmp_path, session=_BoomSession(), today=date(2026, 11, 12)
+    )
+    logs = store.nba_logs()
+    assert logs is not None  # the game logs themselves still load
+    assert logs.positions == {}  # positions degrade to unknown, honestly
+    assert logs.position_of("LeBron James") is None
+
+
 # ---------- app render: Props page breakdown (AppTest) ----------
 
 def _run_app(secrets=None):

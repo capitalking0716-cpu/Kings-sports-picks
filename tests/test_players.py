@@ -53,6 +53,17 @@ def _nba_logs():
                     source_label=game_logs.NBA_SOURCE, season_label="2026-27")
 
 
+def _nfl_logs_with_positions():
+    logs = _nfl_logs()
+    logs.positions = {
+        "patrick mahomes": "QB",
+        "michael penix": "QB",
+        "luther burden": "WR",
+        # Joe Blank deliberately unstated -> Other / unknown.
+    }
+    return logs
+
+
 class _FakeStore:
     """Stands in for StatsStore — same two methods the app calls,
     fixture data only."""
@@ -171,6 +182,84 @@ def test_stat_sections_unknown_stat_still_shows_after_known_ones():
     assert [s.label for s in sections] == ["Passing Yards", "Blocked Kicks"]
 
 
+# ---------- position groups ----------
+
+def _group_logs(sport, keys, positions):
+    return GameLogs(
+        sport=sport,
+        by_player={key: {"Points": [1.0]} for key in keys},
+        positions=positions,
+    )
+
+
+def test_position_groups_nfl_order_counts_and_unknown_last():
+    keys = ["q bone", "r bone", "w rone", "t eone", "f bone",
+            "l bone", "k icker", "m ystery"]
+    positions = {
+        "q bone": "QB", "r bone": "RB", "w rone": "WR", "t eone": "TE",
+        "f bone": "FB", "l bone": "LB", "k icker": "K",
+        # "m ystery" unstated -> Other / unknown
+    }
+    groups = players.position_groups(_group_logs("NFL", keys, positions))
+    # Task order first (QB, RB, WR, TE, FB), other feed labels
+    # alphabetically (K before LB), unknown group last.
+    assert [label for label, _members in groups] == [
+        "QB", "RB", "WR", "TE", "FB", "K", "LB", "Other / unknown",
+    ]
+    by_label = dict(groups)
+    assert by_label["QB"] == ["Q Bone"]
+    assert by_label["Other / unknown"] == ["M Ystery"]
+    assert sum(len(m) for _l, m in groups) == len(keys)  # nobody dropped
+
+
+def test_position_groups_nba_order_then_extras_alphabetical():
+    keys = ["a g", "b gf", "c f", "d fc", "e c", "f fg", "g cf"]
+    positions = {
+        "a g": "Guard", "b gf": "Guard-Forward", "c f": "Forward",
+        "d fc": "Forward-Center", "e c": "Center",
+        "f fg": "Forward-Guard", "g cf": "Center-Forward",
+    }
+    groups = players.position_groups(_group_logs("NBA", keys, positions))
+    assert [label for label, _members in groups] == [
+        "Guard", "Guard-Forward", "Forward", "Forward-Center", "Center",
+        "Center-Forward", "Forward-Guard",  # extras, alphabetical
+    ]
+
+
+def test_position_groups_members_sorted_alphabetical():
+    logs = _group_logs(
+        "NFL",
+        ["z ed", "a aron"],
+        {"z ed": "QB", "a aron": "QB"},
+    )
+    assert players.position_groups(logs) == [("QB", ["A Aron", "Z Ed"])]
+
+
+def test_position_groups_empty_when_feed_states_no_positions():
+    logs = _group_logs("NFL", ["some guy"], {})
+    assert players.position_groups(logs) == []
+    # A mapping that names nobody in the player list is, for this
+    # page, no position data at all.
+    logs = _group_logs("NFL", ["some guy"], {"other player": "QB"})
+    assert players.position_groups(logs) == []
+
+
+def test_names_for_group_filters_and_falls_back():
+    logs = _nfl_logs_with_positions()
+    groups = players.position_groups(logs)
+    assert players.names_for_group(logs, groups, players.ALL_POSITIONS) == \
+        players.player_names(logs)
+    assert players.names_for_group(logs, groups, "QB") == [
+        "Michael Penix", "Patrick Mahomes",
+    ]
+    assert players.names_for_group(logs, groups, players.UNKNOWN_POSITION_GROUP) == [
+        "Joe Blank",
+    ]
+    # A stale choice after a feed refresh falls back to everyone.
+    assert players.names_for_group(logs, groups, "Punter") == \
+        players.player_names(logs)
+
+
 # ---------- app render: Players page (AppTest) ----------
 
 def _run_app(secrets=None):
@@ -285,3 +374,60 @@ def test_app_players_page_feed_failure_is_honest_and_other_league_serves():
     league[0].set_value("NFL").run()
     assert not at.exception, f"app raised: {at.exception}"
     assert "Patrick Mahomes" in list(at.selectbox)[0].options
+
+
+# ---------- app render: position filter ----------
+
+def _position_box(at):
+    matches = [b for b in at.selectbox if b.label == "Position"]
+    return matches[0] if matches else None
+
+
+def _picker_box(at):
+    matches = [b for b in at.selectbox if b.label.startswith("Pick a player")]
+    assert matches, "no player picker"
+    return matches[0]
+
+
+def test_app_players_page_position_filter_narrows_picker():
+    at = _login_as_king(_run_app(FAKE_SECRETS))
+    at.session_state["stats_store"] = _FakeStore(
+        nfl=_nfl_logs_with_positions(), nba=_nba_logs()
+    )
+    _goto_players(at)
+
+    box = _position_box(at)
+    assert box is not None, "position filter missing"
+    # AppTest exposes the formatted labels — counts included.
+    assert box.options == [
+        "All positions (4)", "QB (2)", "WR (1)", "Other / unknown (1)",
+    ]
+
+    # Narrow to QBs: the picker keeps only the two quarterbacks.
+    box.set_value("QB (2)").run()
+    assert not at.exception, f"app raised: {at.exception}"
+    picker = _picker_box(at)
+    assert picker.options == ["Michael Penix", "Patrick Mahomes"]
+
+    # The chosen player's position shows in his header.
+    picker.set_value("Patrick Mahomes").run()
+    assert not at.exception, f"app raised: {at.exception}"
+    assert "Patrick Mahomes · QB" in _all_text(at)
+
+    # The unknown group holds the player the feed never placed.
+    _position_box(at).set_value("Other / unknown (1)").run()
+    assert not at.exception, f"app raised: {at.exception}"
+    assert _picker_box(at).options == ["Joe Blank"]
+
+
+def test_app_players_page_without_positions_renders_as_before():
+    at = _login_as_king(_run_app(FAKE_SECRETS))
+    at.session_state["stats_store"] = _FakeStore(nfl=_nfl_logs(), nba=_nba_logs())
+    _goto_players(at)
+
+    # No filter, one honest caption, the full single list.
+    assert _position_box(at) is None
+    assert "Position info isn't available" in _all_text(at)
+    assert _picker_box(at).options == [
+        "Joe Blank", "Luther Burden", "Michael Penix", "Patrick Mahomes",
+    ]

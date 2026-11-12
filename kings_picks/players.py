@@ -59,6 +59,68 @@ def player_names(logs) -> list[str]:
     return sorted(display_name(key) for key in logs.by_player if key)
 
 
+# ---------- position groups (Players page filter) ----------
+
+ALL_POSITIONS = "All positions"
+UNKNOWN_POSITION_GROUP = "Other / unknown"
+
+# The order groups appear in the filter: the positions Neko
+# browses first, in the order the task set; any other label the
+# feed carries follows alphabetically. NBA labels are the words
+# game_logs.expand_nba_position produces from the feed's codes.
+POSITION_ORDER = {
+    "NFL": ["QB", "RB", "WR", "TE", "FB"],
+    "NBA": ["Guard", "Guard-Forward", "Forward", "Forward-Center", "Center"],
+}
+
+
+def position_groups(logs) -> list[tuple[str, list[str]]]:
+    """[(group label, [display names A-Z])] for the Players page
+    position filter, built ONLY from positions the feed stated
+    (logs.positions).
+
+    [] when the league effectively has no positions — the
+    mapping is empty, or it names nobody in the player list —
+    and the page then shows its single unfiltered list. Players
+    whose position is unstated land in UNKNOWN_POSITION_GROUP,
+    last: grouped, never dropped.
+    """
+    positions = getattr(logs, "positions", None) or {}
+    if not positions:
+        return []
+    by_position: dict[str, list[str]] = {}
+    unknown: list[str] = []
+    for key in logs.by_player:
+        if not key:
+            continue
+        label = (positions.get(key) or "").strip()
+        if label:
+            by_position.setdefault(label, []).append(display_name(key))
+        else:
+            unknown.append(display_name(key))
+    if not by_position:
+        return []
+    preferred = POSITION_ORDER.get(logs.sport, [])
+    ordered = [label for label in preferred if label in by_position]
+    ordered += sorted(label for label in by_position if label not in preferred)
+    groups = [(label, sorted(by_position[label])) for label in ordered]
+    if unknown:
+        groups.append((UNKNOWN_POSITION_GROUP, sorted(unknown)))
+    return groups
+
+
+def names_for_group(logs, groups: list, choice: str) -> list[str]:
+    """The picker list for one filter choice: ALL_POSITIONS is
+    every player A-Z; a group label is that group's members;
+    anything else (a stale choice after a feed refresh) falls
+    back to the full list rather than an empty picker."""
+    if choice != ALL_POSITIONS:
+        for label, members in groups:
+            if label == choice:
+                return list(members)
+    return player_names(logs)
+
+
 def default_line(season_avg: float) -> float:
     """The line the 'test a line' box starts on: the season
     average rounded to the nearest 0.5 (half up), never below 0.

@@ -616,13 +616,40 @@ elif page == "Players":
             "Stats are independent of the odds and the algorithm — the "
             "algorithm reads from this same feed when it scores picks."
         )
-        names = players.player_names(logs)
+        names_all = players.player_names(logs)
+        groups = players.position_groups(logs)
+        if groups:
+            counts = {label: len(members) for label, members in groups}
+            group_options = [players.ALL_POSITIONS] + [
+                label for label, _members in groups
+            ]
+            group_choice = st.selectbox(
+                "Position",
+                group_options,
+                format_func=lambda label: (
+                    f"{label} ({len(names_all)})"
+                    if label == players.ALL_POSITIONS
+                    else f"{label} ({counts[label]})"
+                ),
+                key=f"players_position_{league}",
+            )
+            names = players.names_for_group(logs, groups, group_choice)
+        else:
+            st.caption(
+                f"Position info isn't available from the {league} feed "
+                "right now, so every player is in one list."
+            )
+            names = names_all
         chosen = st.selectbox(
             f"Pick a player — {len(names)} in the {league} feed",
             names,
             key=f"players_pick_{league}",
         )
-        st.markdown(f"## {chosen}")
+        position = logs.position_of(chosen)
+        if position:
+            st.markdown(f"## {chosen} · {position}")
+        else:
+            st.markdown(f"## {chosen}")
         sections = players.stat_sections(logs, chosen)
         if not sections:
             st.write("This feed has no game stats logged for him yet.")

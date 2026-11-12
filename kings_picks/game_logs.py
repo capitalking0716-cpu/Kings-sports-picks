@@ -19,6 +19,18 @@ Built 2026-11-12, after probing what actually works:
   different. If the feed fails there, NBA form silently stays
   off — the app never breaks and never fakes a number.
 
+POSITIONS (browsing only — the scoring path never reads them):
+- NFL: the same nflverse CSV's own `position` column, taken
+  from each player's most recent regular-season row.
+- NBA: LeagueGameLog rows carry no position, so positions come
+  from the nba_api PlayerIndex endpoint (probed 2026-11-12:
+  526 rows, every player has a POSITION code — 'G', 'F', 'C'
+  and combos like 'G-F'). The codes are expanded to the words
+  they stand for (G -> Guard, ...): a translation of the feed's
+  own label, never an assignment. Any failure leaves NBA
+  positions empty and the Players page simply shows one list.
+A position is NEVER guessed from a player's stats.
+
 FAIL-SOFT IS THE RULE: every fetch/parse error returns None.
 No feed = odds-only labels, exactly like before this module
 existed. These feeds NEVER touch The Odds API (quota!).
@@ -147,12 +159,21 @@ class FormSummary:
 @dataclass
 class GameLogs:
     """One feed, parsed: normalized player name -> prop label ->
-    game values, newest game first."""
+    game values, newest game first. `positions` maps the same
+    normalized names to the position label the feed stated for
+    the player (empty when the feed didn't provide one) — used
+    only by the Players page, never by scoring."""
 
     sport: str
     by_player: dict = field(default_factory=dict)
     source_label: str = ""
     season_label: str = ""
+    positions: dict = field(default_factory=dict)
+
+    def position_of(self, player: str):
+        """The player's position as the feed stated it, or None
+        when unknown. Never guessed."""
+        return self.positions.get(normalize_name(player)) or None
 
     def values(self, player: str, prop_label: str):
         """The player's game values for this prop, newest first,
@@ -204,6 +225,36 @@ def parse_nflverse_csv(text: str) -> dict:
     }
 
 
+def parse_nflverse_positions(text: str) -> dict:
+    """nflverse weekly CSV text -> {normalized name: position}.
+
+    The position is the feed's own `position` column from the
+    player's MOST RECENT regular-season row that states one —
+    positions can drift week to week in the source data, and a
+    blank cell never erases a position the feed did state.
+    Nothing is inferred from stats: a player whose rows never
+    name a position simply isn't in the result.
+    """
+    reader = csv.DictReader(io.StringIO(text))
+    latest: dict[str, tuple[int, str]] = {}
+    for row in reader:
+        season_type = (row.get("season_type") or "REG").strip()
+        if season_type != "REG":
+            continue
+        name = (row.get("player_display_name") or "").strip()
+        position = (row.get("position") or "").strip()
+        if not name or not position:
+            continue
+        try:
+            week = int(float(row.get("week") or 0))
+        except (TypeError, ValueError):
+            week = 0
+        key = normalize_name(name)
+        if key not in latest or week >= latest[key][0]:
+            latest[key] = (week, position)
+    return {key: position for key, (_week, position) in latest.items()}
+
+
 def parse_nba_game_log_rows(rows: list) -> dict:
     """LeagueGameLog records (list of dicts) -> same shape as the
     nflverse parser. Rows with no stat line (did-not-play) are
@@ -227,6 +278,45 @@ def parse_nba_game_log_rows(rows: list) -> dict:
         }
         for player, stats in per_player.items()
     }
+
+
+# stats.nba.com's PlayerIndex sends position CODES, not words.
+NBA_POSITION_WORDS = {"G": "Guard", "F": "Forward", "C": "Center"}
+
+
+def expand_nba_position(code) -> str:
+    """'G' -> 'Guard', 'G-F' -> 'Guard-Forward', 'F-C' ->
+    'Forward-Center'. Unknown code parts pass through as-is —
+    the label always comes from the feed, this only spells it
+    out. Blank/junk -> '' (position unknown)."""
+    if code is None:
+        return ""
+    text = str(code).strip()
+    if not text or text.lower() in ("nan", "none"):
+        return ""
+    parts = []
+    for part in text.split("-"):
+        part = part.strip()
+        if part:
+            parts.append(NBA_POSITION_WORDS.get(part, part))
+    return "-".join(parts)
+
+
+def parse_nba_player_index_rows(rows: list) -> dict:
+    """PlayerIndex records (list of dicts) -> {normalized name:
+    position label}. Rows with no name or no position are
+    skipped — an unstated position stays unknown, never filled
+    in from anything else."""
+    positions: dict[str, str] = {}
+    for row in rows:
+        first = (row.get("PLAYER_FIRST_NAME") or "").strip()
+        last = (row.get("PLAYER_LAST_NAME") or "").strip()
+        label = expand_nba_position(row.get("POSITION"))
+        if not label or (not first and not last):
+            continue
+        name = " ".join(part for part in (first, last) if part)
+        positions[normalize_name(name)] = label
+    return positions
 
 
 class StatsStore:
@@ -268,7 +358,17 @@ class StatsStore:
 
     # ---------- NFL (nflverse) ----------
 
-    def _fetch_nflverse(self, season: int) -> dict | None:
+    # The cache filename carries a version: v1 files hold logs
+    # only (no positions). Reading only v2 names means a stale
+    # pre-positions cache is ignored outright instead of silently
+    # serving a week of position-less data under the 7-day TTL.
+    @staticmethod
+    def _nfl_cache_name(season: int) -> str:
+        return f"nflverse_{season}_v2.json"
+
+    def _fetch_nflverse(self, season: int):
+        """(logs, positions) parsed from one CSV download, or
+        None on any failure."""
         try:
             resp = self.session.get(
                 NFLVERSE_URL.format(season=season), timeout=60
@@ -278,7 +378,10 @@ class StatsStore:
         if resp.status_code != 200:
             return None
         try:
-            return parse_nflverse_csv(resp.text)
+            return (
+                parse_nflverse_csv(resp.text),
+                parse_nflverse_positions(resp.text),
+            )
         except Exception:
             return None
 
@@ -287,31 +390,41 @@ class StatsStore:
             return self._nfl
         self._nfl_tried = True
         season = nfl_season_for(self.today)
-        cached = self._read_cache(f"nflverse_{season}.json", NFL_TTL_SECONDS)
+        cached = self._read_cache(self._nfl_cache_name(season), NFL_TTL_SECONDS)
         if cached is None and season - 1 >= 2020:
             # Offseason / new-season gap: last season is the cache
             # that might exist; freshness still enforced by TTL.
-            cached = self._read_cache(f"nflverse_{season - 1}.json", NFL_TTL_SECONDS)
+            cached = self._read_cache(
+                self._nfl_cache_name(season - 1), NFL_TTL_SECONDS
+            )
         if cached is not None:
             self._nfl = GameLogs(
                 sport="NFL",
                 by_player=cached.get("logs", {}),
                 source_label=NFL_SOURCE,
                 season_label=str(cached.get("season", "")),
+                positions=cached.get("positions", {}) or {},
             )
             return self._nfl
         for candidate in (season, season - 1):
-            logs = self._fetch_nflverse(candidate)
-            if logs:
+            fetched = self._fetch_nflverse(candidate)
+            if fetched and fetched[0]:
+                logs, positions = fetched
                 self._write_cache(
-                    f"nflverse_{candidate}.json",
-                    {"fetched_at": time.time(), "season": candidate, "logs": logs},
+                    self._nfl_cache_name(candidate),
+                    {
+                        "fetched_at": time.time(),
+                        "season": candidate,
+                        "logs": logs,
+                        "positions": positions,
+                    },
                 )
                 self._nfl = GameLogs(
                     sport="NFL",
                     by_player=logs,
                     source_label=NFL_SOURCE,
                     season_label=str(candidate),
+                    positions=positions,
                 )
                 return self._nfl
         return None
@@ -350,6 +463,7 @@ class StatsStore:
                 by_player=cached.get("logs", {}),
                 source_label=NBA_SOURCE,
                 season_label=str(cached.get("season", "")),
+                positions=self._nba_positions(season),
             )
             return self._nba
         logs = self._fetch_nba(season)
@@ -363,9 +477,51 @@ class StatsStore:
                 by_player=logs,
                 source_label=NBA_SOURCE,
                 season_label=season,
+                positions=self._nba_positions(season),
             )
             return self._nba
         return None
+
+    # ---------- NBA positions (PlayerIndex) ----------
+    # LeagueGameLog rows state no position, so positions come
+    # from a second endpoint with its OWN cache and lifecycle.
+    # Positions failing (or the endpoint being unreachable) only
+    # empties the mapping — the game logs above are unaffected.
+
+    def _fetch_nba_positions(self, season: str) -> dict | None:
+        try:
+            from nba_api.stats.endpoints import PlayerIndex
+        except Exception:
+            return None
+        for _attempt in range(2):  # same flaky feed — one retry
+            try:
+                result = PlayerIndex(season=season, timeout=60)
+                rows = result.get_data_frames()[0].to_dict("records")
+                positions = parse_nba_player_index_rows(rows)
+                if positions:
+                    return positions
+            except Exception:
+                continue
+        return None
+
+    def _nba_positions(self, season: str) -> dict:
+        """{normalized name: position label} for the NBA, disk-
+        cached daily; {} whenever the feed won't provide them."""
+        cached = self._read_cache("nba_positions.json", NBA_TTL_SECONDS)
+        if cached is not None:
+            return cached.get("positions", {}) or {}
+        positions = self._fetch_nba_positions(season)
+        if positions:
+            self._write_cache(
+                "nba_positions.json",
+                {
+                    "fetched_at": time.time(),
+                    "season": season,
+                    "positions": positions,
+                },
+            )
+            return positions
+        return {}
 
 
 def make_form_lookup(nfl: GameLogs | None, nba: GameLogs | None):
