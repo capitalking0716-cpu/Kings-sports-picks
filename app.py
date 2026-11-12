@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 
 import streamlit as st
 
-from kings_picks import breakdown, demo_data, game_logs, learning, lilly, players, profiles, projection
+from kings_picks import breakdown, demo_data, game_logs, learning, lilly, players, profiles, projection, slip
 from kings_picks.ledger import Ledger
 from kings_picks.model import SCORING_VERSION, score_prop
 from kings_picks.odds_api import OddsApiClient
@@ -224,6 +224,7 @@ PICK_LOG = PickLog(f"{DATA_DIR}/pick_log.json")
 LEARNING = learning.LearningEngine(
     f"{DATA_DIR}/learned.json", f"{DATA_DIR}/lilly-lessons.jsonl"
 )
+SLIP_BOOK = slip.SlipBook(f"{DATA_DIR}/slips.json")
 
 
 def get_client() -> OddsApiClient:
@@ -426,7 +427,7 @@ if st.sidebar.button("Log out / switch profile", key="logout"):
     st.rerun()
 page = st.sidebar.radio(
     "Go to",
-    ["Dashboard", "Props", "Players", "💜 Lilly", "Results / Ledger", "Setup"],
+    ["Dashboard", "Props", "🎟️ My Slip", "Players", "💜 Lilly", "Results / Ledger", "Setup"],
     index=0,
 )
 st.sidebar.markdown("---")
@@ -640,6 +641,157 @@ elif page == "Props":
                 unsafe_allow_html=True,
             )
 
+# ================= MY SLIP =================
+elif page == "🎟️ My Slip":
+    st.title("🎟️ My Slip — build your own picks")
+    st.write(
+        "Your picks, your call. Add selections from today's board and the "
+        "slip does the maths out loud: the combined odds, Lilly's true "
+        "overall chance for the whole slip, and what your amount would "
+        "pay if every leg hits."
+    )
+    st.info(slip.CALCULATOR_NOTE)
+    if st.session_state["mode"] == "demo":
+        st.markdown(
+            "<div class='demo-banner'>⚠️ DEMO MODE — SAMPLE PROPS, NOT LIVE. "
+            "Anything you build and save here is sample record only.</div>",
+            unsafe_allow_html=True,
+        )
+    flash = st.session_state.pop("slip_flash", None)
+    if flash:
+        st.success(flash)
+
+    # ----- Your slip so far (this profile's own slip) -----
+    st.subheader(f"🧾 {profiles.PROFILE_LABELS[active_profile]}'s slip")
+    my_legs = SLIP_BOOK.legs(active_profile)
+    stake_key = f"slip_stake_{active_profile}"
+    if stake_key not in st.session_state:
+        st.session_state[stake_key] = 10.0
+    if not my_legs:
+        st.write(
+            "Your slip is empty. Add selections from the board below — "
+            "each profile keeps its own slip."
+        )
+    else:
+        for leg in my_legs:
+            form_tag = "✅ Recent form included" if leg.has_form_data else "⚠️ Odds-only — no recent-form data"
+            st.markdown(
+                f"<div class='pick-card'>"
+                f"<b style='font-size:18px'>{leg.label}</b> — {leg.sport}<br>"
+                f"Odds: {leg.odds:+d} &nbsp;|&nbsp; Lilly's chance: <b>{leg.probability:.0%}</b> &nbsp;|&nbsp; "
+                f"{leg.bookmaker or ''} &nbsp;|&nbsp; {leg.event}<br>"
+                f"{form_tag}"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+            if st.button("❌ Remove", key=f"slip-remove-{active_profile}-{leg.key}"):
+                SLIP_BOOK.remove(active_profile, leg.key)
+                st.rerun()
+        # Quick amounts first (they set the stake the number
+        # input below then shows), then the adjustable amount.
+        st.markdown("**Bet amount** — tap a quick amount or type your own:")
+        chip_cols = st.columns(5)
+        for chip_col, amount in zip(chip_cols, (1, 5, 10, 25, 50)):
+            if chip_col.button(f"${amount}", key=f"slip-chip-{active_profile}-{amount}"):
+                st.session_state[stake_key] = float(amount)
+                st.rerun()
+        stake = st.number_input(
+            "Bet amount ($)",
+            min_value=0.0,
+            step=1.0,
+            format="%.2f",
+            key=stake_key,
+        )
+        summary = slip.slip_summary(my_legs, float(stake))
+        sm1, sm2, sm3, sm4 = st.columns(4)
+        sm1.metric(
+            "Combined odds",
+            f"{summary['american_odds']:+d}",
+            help=f"Decimal {summary['decimal_odds']:.2f} — what $1 returns if every leg wins.",
+        )
+        sm2.metric(
+            "True overall chance",
+            f"{summary['overall_probability']:.1%}",
+            help="Lilly's estimate: her chance for each leg, multiplied together.",
+        )
+        sm3.metric("If it hits, you get back", f"${summary['payout']:.2f}")
+        sm4.metric("Profit", f"${summary['profit']:.2f}")
+        st.write(
+            f"Lilly's estimate for the whole slip: **{summary['overall_probability']:.1%}** "
+            f"(about 1 in {summary['one_in']:.0f}) &nbsp;|&nbsp; "
+            f"Expected value at this amount: **${summary['expected_value']:+.2f}** "
+            "(her chance × the payout − your stake)."
+        )
+        save_col, clear_col = st.columns(2)
+        if clear_col.button("🧹 Clear slip", key="slip-clear"):
+            SLIP_BOOK.clear(active_profile)
+            st.rerun()
+        if save_col.button("💾 Save slip to my record", key="slip-save"):
+            added, already = PICK_LOG.record_manual(
+                my_legs,
+                mode=st.session_state["mode"],
+                profile=active_profile,
+            )
+            SLIP_BOOK.clear(active_profile)
+            note = (
+                f"Saved {len(added)} new pick(s) to your record"
+                + (f" — {len(already)} leg(s) were already on it (Lilly logged them too)." if already else ".")
+                + " Settle them Won / Lost on Results / Ledger after the games."
+            )
+            if st.session_state["mode"] == "demo":
+                note += " These were DEMO picks — sample record only."
+            st.session_state["slip_flash"] = note
+            st.rerun()
+
+    # ----- Today's board: the same props the Props page shows -----
+    st.markdown("---")
+    st.subheader("📋 Today's board")
+    scored = st.session_state["scored"]
+    if not scored:
+        st.write(
+            "No board loaded yet. Loading it uses the same cached slate "
+            "fetch as the Dashboard — no extra quota beyond that fetch, "
+            "and none at all while the cache is warm."
+        )
+        if st.button("📥 Load today's board"):
+            with st.spinner("Loading today's board..."):
+                run_algorithm(force_refresh=False)
+            st.rerun()
+    else:
+        if st.session_state["note"]:
+            st.caption(st.session_state["note"])
+        search = st.text_input("Search a player", key="slip_search", placeholder="Start typing a name…")
+        sport_choice = st.radio(
+            "League", ["All", "NBA", "NFL"], horizontal=True, key="slip_sport"
+        )
+        on_slip = SLIP_BOOK.keys(active_profile)
+        board = [
+            p for p in scored
+            if (sport_choice == "All" or p.sport == sport_choice)
+            and (not search or search.lower() in p.player.lower())
+        ]
+        st.write(f"{len(board)} selections on the board — best chance first, the way Lilly ranks them.")
+        for pick in board:
+            form_tag = "✅ Recent form included" if pick.has_form_data else "⚠️ Odds-only — no recent-form data"
+            st.markdown(
+                f"<div class='pick-card'>"
+                f"<b style='font-size:18px'>{pick.label}</b> — {pick.sport}<br>"
+                f"Odds: {pick.odds:+d} &nbsp;|&nbsp; Lilly's chance: <b>{pick.probability:.0%}</b> &nbsp;|&nbsp; "
+                f"{pick.bookmaker or ''} &nbsp;|&nbsp; {pick.event}<br>"
+                f"{form_tag}<br>"
+                f"<i>{pick.why}</i>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+            if pick.key in on_slip:
+                if st.button("✅ On your slip — tap to remove", key=f"slip-toggle-{active_profile}-{pick.key}"):
+                    SLIP_BOOK.remove(active_profile, pick.key)
+                    st.rerun()
+            else:
+                if st.button("➕ Add to slip", key=f"slip-toggle-{active_profile}-{pick.key}"):
+                    SLIP_BOOK.add(active_profile, slip.SlipLeg.from_prop(pick))
+                    st.rerun()
+
 # ================= PLAYERS =================
 elif page == "Players":
     st.title("🏃 Players")
@@ -824,7 +976,9 @@ elif page == "Results / Ledger":
     st.write(
         "Every leg of every parlay, logged on its own and tracked **whether anyone "
         "played it or not**. Settlement is by hand — no free feed has final player "
-        "stats, so after the games you tap Won or Lost here. Lilly never guesses a result."
+        "stats, so after the games you tap Won or Lost here. Lilly never guesses a result. "
+        "Picks built by hand on **My Slip** land here too, tagged ✋ Your pick — settle "
+        "them the same way."
     )
     st.caption(
         "Scoring eras: picks tagged **v2** were scored with Lilly's projection "
@@ -851,6 +1005,13 @@ elif page == "Results / Ledger":
             f"Demo picks are kept out of the record above: {pstats['demo']['total']} demo "
             f"picks logged, {pstats['demo']['settled']} settled. Demo never counts as a real record."
         )
+    if pstats["manual"]["total"]:
+        st.caption(
+            f"Picks built by hand on My Slip are tagged ✋ Your pick and kept out of "
+            f"Lilly's record above: {pstats['manual']['total']} logged, "
+            f"{pstats['manual']['settled']} settled. They are the builder's own record — "
+            f"she does not learn from them. They do count in a profile's played record."
+        )
 
     open_entries = PICK_LOG.open_picks()
     st.markdown("#### Open picks — settle them after the games")
@@ -862,10 +1023,11 @@ elif page == "Results / Ledger":
         with st.expander(f"{group_date} — {len(group)} open picks", expanded=(group_date == open_dates[0])):
             for entry in group:
                 demo_tag = " · DEMO" if entry.mode == "demo" else ""
+                manual_tag = " · ✋ Your pick" if getattr(entry, "source", "lilly") == "manual" else ""
                 i_played = active_profile in entry.played_by
                 st.markdown(
                     f"<div class='pick-card'>"
-                    f"<b style='font-size:17px'>{entry.label}</b> — {entry.sport}{demo_tag} · {entry.model}<br>"
+                    f"<b style='font-size:17px'>{entry.label}</b> — {entry.sport}{demo_tag}{manual_tag} · {entry.model}<br>"
                     f"{entry.event} &nbsp;|&nbsp; Odds: {entry.odds:+d} &nbsp;|&nbsp; "
                     f"Chance: <b>{entry.probability:.0%}</b>"
                     f"</div>",
@@ -889,12 +1051,13 @@ elif page == "Results / Ledger":
             for entry in settled_entries[:30]:
                 mark = "✅ Won" if entry.status == "won" else "❌ Lost"
                 demo_tag = " · DEMO" if entry.mode == "demo" else ""
+                manual_tag = " · ✋ Your pick" if getattr(entry, "source", "lilly") == "manual" else ""
                 played_note = (
                     f" · played by {', '.join(entry.played_by)}" if entry.played_by else ""
                 )
                 learned_note = f" · 📚 learned: {entry.learning}" if entry.learning else ""
                 st.write(
-                    f"{mark} — **{entry.label}** — {entry.event} · {entry.date}{demo_tag} · {entry.model}{played_note}{learned_note}"
+                    f"{mark} — **{entry.label}** — {entry.event} · {entry.date}{demo_tag}{manual_tag} · {entry.model}{played_note}{learned_note}"
                 )
             if len(settled_entries) > 30:
                 st.caption(f"Showing the newest 30 of {len(settled_entries)} settled picks.")

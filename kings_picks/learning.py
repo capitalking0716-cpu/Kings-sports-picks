@@ -10,7 +10,11 @@ VaultTec, adapted to a picks app):
   her only when it is mode="live" AND a human settled it
   Won / Lost on the Results page. Demo picks never teach —
   they are sample data. Open picks never teach — nobody
-  knows how they ended yet.
+  knows how they ended yet. MANUAL picks never teach either:
+  a pick a profile built by hand on the My Slip page
+  (source="manual") is the user's selection, not Lilly's —
+  grading her probabilities against picks she did not make
+  would contaminate her calibration.
 - What she learns is CALIBRATION, nothing more: in each
   bucket (sport x market x side, e.g. NBA Points overs, and
   a coarser sport x side level), compare the chance she
@@ -182,12 +186,18 @@ class Bucket:
 
 
 def teaching_entries(entries) -> list:
-    """The only entries allowed to teach: live AND settled.
-    Demo never teaches; open picks never teach."""
+    """The only entries allowed to teach: Lilly's OWN picks,
+    live AND settled. Demo never teaches; open picks never
+    teach; manual (hand-built) picks never teach — they are
+    the user's selections, not hers. Entries saved before
+    the source tag existed have no "manual" marker and are
+    hers by default."""
     return [
         e
         for e in entries
-        if e.mode == "live" and e.status in (WON, LOST)
+        if e.mode == "live"
+        and e.status in (WON, LOST)
+        and getattr(e, "source", "lilly") != "manual"
     ]
 
 

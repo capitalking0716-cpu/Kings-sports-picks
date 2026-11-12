@@ -29,6 +29,16 @@ before the tag existed have no model in the JSON and load as
 Lilly's record can be split by era later and v2 has to prove
 itself against v1 on settled picks, not on promises.
 
+Entries also carry a `source` tag: "lilly" for picks Lilly's
+algorithm generated (the default — every entry saved before
+the tag existed is hers), or "manual" for picks a profile
+built by hand on the My Slip page. Manual picks are the
+USER's record, not Lilly's: they are settled the same way,
+but they never count in her headline hit rate and they
+NEVER teach her learning loop (kings_picks/learning.py) —
+grading her probabilities against hand-picked selections
+would contaminate her calibration.
+
 Paper tracking only. No real bets, no money moved.
 """
 
@@ -85,6 +95,14 @@ class PickEntry:
     # no learned correction touched the pick. Entries saved
     # before the learning loop existed load with "".
     learning: str = ""
+    # Who chose this pick: "lilly" (her algorithm — the
+    # default, and what every entry saved before this field
+    # existed loads as) or "manual" (a profile built it by
+    # hand on the My Slip page). Manual picks settle like
+    # any other pick, but they are the user's record: kept
+    # out of Lilly's headline hit rate and NEVER fed to her
+    # learning loop.
+    source: str = "lilly"
 
 
 class PickLog:
@@ -160,6 +178,69 @@ class PickLog:
             self._save()
         return added
 
+    def record_manual(
+        self,
+        legs,
+        mode: str,
+        profile: str,
+        created: str | None = None,
+    ) -> tuple[list[PickEntry], list[PickEntry]]:
+        """Log the legs of a hand-built My Slip slip.
+
+        `legs` are slip legs (kings_picks/slip.py SlipLeg —
+        anything with player / sport / prop / side / line /
+        odds / probability / event / label). Each leg becomes
+        an entry tagged source="manual" and marked played by
+        `profile`: it is that profile's own pick, on their own
+        record, settle-able on Results like any other pick.
+
+        First write wins, same as record_run: if the same pick
+        (same date + event + player + market + line) is already
+        in the log — most often because Lilly's algorithm
+        logged it earlier that day — the existing entry is
+        kept exactly as it is (its source stays whatever it
+        was) and the profile is simply added to its played_by.
+        Returns (newly_added, already_on_record).
+        """
+        created = created or date.today().isoformat()
+        profile = _profiles.normalize_profile(profile)
+        added: list[PickEntry] = []
+        already: list[PickEntry] = []
+        changed = False
+        for leg in legs:
+            market = f"{leg.prop} {leg.side}"
+            key = pick_key(created, leg.event, leg.player, market, leg.line)
+            existing = self._find(key)
+            if existing is not None:
+                if profile not in existing.played_by:
+                    existing.played_by.append(profile)
+                    changed = True
+                already.append(existing)
+                continue
+            entry = PickEntry(
+                id=key,
+                key=key,
+                date=created,
+                sport=leg.sport,
+                event=leg.event,
+                player=leg.player,
+                market=market,
+                line=float(leg.line),
+                odds=int(leg.odds),
+                probability=float(leg.probability),
+                mode=mode,
+                label=leg.label,
+                played_by=[profile],
+                model=SCORING_VERSION,
+                source="manual",
+            )
+            self.entries.append(entry)
+            added.append(entry)
+            changed = True
+        if changed:
+            self._save()
+        return added, already
+
     # ---------- settling / played ----------
 
     def _find(self, key: str) -> PickEntry | None:
@@ -232,22 +313,29 @@ class PickLog:
     def stats(self, profile: str | None = None) -> dict:
         """Hit-rate numbers for the pick log.
 
-        The headline block covers LIVE picks only. Demo picks are
-        counted in their own separate block and never mixed in.
-        The "played" block is `profile`'s own played record —
-        live picks they marked "I played this" — again with demo
-        excluded. With no profile given, "played" covers picks
-        played by anyone.
+        The headline block covers Lilly's LIVE picks only. Demo
+        picks are counted in their own separate block and never
+        mixed in, and neither are MANUAL picks (hand-built on
+        My Slip): they are the user's record, not hers, so
+        they get their own "manual" block. The "played" block
+        is `profile`'s own played record — live picks they
+        marked "I played this", which includes their saved
+        manual picks (those are played by them by definition)
+        — again with demo excluded. With no profile given,
+        "played" covers picks played by anyone.
         """
         live = [e for e in self.entries if e.mode == "live"]
         demo = [e for e in self.entries if e.mode != "live"]
+        lilly_live = [e for e in live if getattr(e, "source", "lilly") != "manual"]
+        manual_live = [e for e in live if getattr(e, "source", "lilly") == "manual"]
         if profile is None:
             played = [e for e in live if e.played_by]
         else:
             profile = _profiles.normalize_profile(profile)
             played = [e for e in live if profile in e.played_by]
-        headline = self._block(live)
+        headline = self._block(lilly_live)
         headline["demo"] = self._block(demo)
+        headline["manual"] = self._block(manual_live)
         headline["played"] = self._block(played)
         return headline
 

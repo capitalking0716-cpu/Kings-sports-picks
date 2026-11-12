@@ -59,6 +59,22 @@ def american_to_decimal(odds: int) -> float:
     return 1.0 + 100.0 / abs(odds)
 
 
+def decimal_to_american(decimal: float) -> int:
+    """Decimal payout -> American odds (the inverse conversion).
+
+    decimal >= 2.0 is a plus price: (decimal - 1) x 100.
+    1.0 < decimal < 2.0 is a minus price: -100 / (decimal - 1).
+    Rounded to the nearest whole number, the way books quote
+    combined parlay prices. A decimal at or below 1.0 is not
+    a real price (it would mean no possible profit) and raises.
+    """
+    if decimal <= 1.0:
+        raise ValueError("Decimal odds must be above 1.0.")
+    if decimal >= 2.0:
+        return int(round((decimal - 1.0) * 100.0))
+    return -int(round(100.0 / (decimal - 1.0)))
+
+
 def remove_vig(over_odds: int, under_odds: int) -> tuple[float, float]:
     """Take the bookmaker's cut out of an Over/Under pair.
 

@@ -117,6 +117,10 @@ may only restate her verdict in her voice — never change it.
 
 - **Dashboard** — today's parlays, with true overall chance and expected value.
 - **Props** — every prop Lilly can see, with its chance and why.
+- **🎟️ My Slip** — build your own slip from the same board: per-selection odds
+  and Lilly's chance, combined odds, true overall chance, and an adjustable
+  bet amount that updates payout / profit / EV. A calculator — Lilly never
+  places bets. Each profile keeps its own slip.
 - **💜 Lilly** — her brief, always-on chat, and the "Run the algorithm" button.
 - **Results / Ledger** — mark picks won/lost after the games; hit rates per parlay
   size, per pick, and overall. Saved locally in `data/ledger.json`.
@@ -146,6 +150,38 @@ Lilly recalibrates from her own settled record (`kings_picks/learning.py`):
 - Learning reads the on-disk pick log only — **zero Odds API calls**.
   Recalibration is not a promise of profit or accuracy.
 
+## My Slip (manual pick-slip builder)
+
+Neko asked to make his own picks too, so the **🎟️ My Slip** page
+(`kings_picks/slip.py`) is a bet-slip calculator over the same board Lilly
+uses — the same slate fetch and cache as the Props page, so opening it adds
+no Odds API calls beyond that fetch:
+
+- Each board row shows the player, prop, side, line, the book's American
+  odds + bookmaker, and Lilly's chance for that side (the v2 scoring path,
+  learning corrections included — the same numbers the breakdown shows).
+- One slip per profile, saved in `data/slips.json`. A selection can't
+  repeat (the Prop.key rule — both sides of one line can't share a slip).
+- The maths are Lilly's parlay maths: combined decimal odds = product of
+  the legs' decimal odds (shown as American + decimal); **true overall
+  probability** = product of Lilly's per-leg chances, labelled as her
+  estimate; payout = stake × combined decimal; profit and expected value
+  update live with the adjustable stake (quick-amount chips + a typed
+  amount). Changing the amount never changes the odds or the chance.
+- **Save slip** logs the legs to the pick log tagged `source="manual"`
+  (and marked played by the saving profile), so they settle Won / Lost on
+  Results like everything else. First write wins: a leg Lilly already
+  logged that day stays her entry and simply gains the played mark.
+- Manual picks are the **user's** record: they are kept out of Lilly's
+  headline hit rate (their own block in `PickLog.stats`) and they
+  **never teach her learning loop** — she recalibrates only on picks she
+  made herself.
+- The slip states plainly that it is a calculator: Lilly doesn't place
+  bets, the shown odds are the books' prices at fetch time and can move
+  at the real book, and multi-leg slips are long shots by nature.
+  In demo mode the builder runs on the labelled sample board and saved
+  slips are demo record only.
+
 ## Membership plan (NOT built yet)
 
 Neko's plan: sell this as a **$25/month membership ONLY after consistent picks are
@@ -170,6 +206,7 @@ kings_picks/
   parlays.py              Parlay builder (highest overall chance, no duplicates)
   lilly.py                Lilly — brief, verdicts, offline chat
   learning.py             Self-learning loop (calibration from settled live picks)
+  slip.py                 My Slip — manual pick-slip builder (calculator, per-profile)
   pick_log.py             Every pick logged and tracked won/lost, played or not
   ledger.py               Results ledger (local JSON, per-profile records)
   profiles.py             King & Kohen PIN login (PINs live only in Streamlit secrets)
