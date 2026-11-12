@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 
 import streamlit as st
 
-from kings_picks import breakdown, demo_data, game_logs, lilly, profiles
+from kings_picks import breakdown, demo_data, game_logs, lilly, players, profiles
 from kings_picks.ledger import Ledger
 from kings_picks.model import score_prop
 from kings_picks.odds_api import OddsApiClient
@@ -250,6 +250,24 @@ def load_props(force_refresh: bool = False):
     return props, "live", note
 
 
+def _get_stats_store():
+    """The ONE stats store for the whole app, held in session
+    state.
+
+    Browsing (the Players page) and the algorithm both read
+    player stats through this single store — same disk cache
+    (data/cache, shared with the odds cache), same parsed logs —
+    so the two can never disagree about a player's form, and
+    the free feeds download at most once per app session no
+    matter how often the page reruns.
+    """
+    store = st.session_state.get("stats_store")
+    if store is None:
+        store = game_logs.StatsStore(f"{DATA_DIR}/cache")
+        st.session_state["stats_store"] = store
+    return store
+
+
 def _form_lookup_for(mode: str):
     """The real-form lookup for one run, or None.
 
@@ -258,12 +276,14 @@ def _form_lookup_for(mode: str):
     never acquire form data, and any feed failure just means
     this run stays odds-only. The loaded logs are stashed in
     session state so the Props page breakdown can show the
-    same form the scoring used.
+    same form the scoring used. The feeds come through the
+    shared store (_get_stats_store) — the exact same data the
+    Players page browses.
     """
     if mode != "live":
         return None
     try:
-        store = game_logs.StatsStore(f"{DATA_DIR}/stats_cache")
+        store = _get_stats_store()
         nfl = store.nfl_logs()
         nba = store.nba_logs()
     except Exception:
@@ -348,7 +368,7 @@ if st.sidebar.button("Log out / switch profile", key="logout"):
     st.rerun()
 page = st.sidebar.radio(
     "Go to",
-    ["Dashboard", "Props", "💜 Lilly", "Results / Ledger", "Setup"],
+    ["Dashboard", "Props", "Players", "💜 Lilly", "Results / Ledger", "Setup"],
     index=0,
 )
 st.sidebar.markdown("---")
@@ -559,6 +579,100 @@ elif page == "Props":
                 f"</div>",
                 unsafe_allow_html=True,
             )
+
+# ================= PLAYERS =================
+elif page == "Players":
+    st.title("🏃 Players")
+    st.write(
+        "Every player in the stats feeds, with his real game logs — "
+        "**no algorithm run needed, no odds, no API key**. These are the "
+        "exact same numbers Lilly blends into her picks; here you can "
+        "check any player against any line yourself, any time."
+    )
+    league = st.radio("League", ["NFL", "NBA"], horizontal=True, key="players_league")
+    logs = None
+    try:
+        with st.spinner(
+            f"Loading {league} player stats… the first load downloads the "
+            "feed (a few seconds); after that it's cached."
+        ):
+            store = _get_stats_store()
+            logs = store.nfl_logs() if league == "NFL" else store.nba_logs()
+    except Exception:
+        logs = None
+    if logs is None:
+        st.markdown(
+            f"<div class='warn-box'><b>The {league} stats feed didn't answer "
+            "this time.</b><br>Nothing is broken — the feed is free and "
+            "sometimes slow or down. Try again in a bit, or check the other "
+            "league above. Lilly never fills a gap with invented stats, so "
+            "this page shows nothing rather than something fake.</div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        season_note = f" · {logs.season_label} season" if logs.season_label else ""
+        st.caption(f"Player stats: {logs.source_label}{season_note}")
+        st.caption(
+            "Stats are independent of the odds and the algorithm — the "
+            "algorithm reads from this same feed when it scores picks."
+        )
+        names = players.player_names(logs)
+        chosen = st.selectbox(
+            f"Pick a player — {len(names)} in the {league} feed",
+            names,
+            key=f"players_pick_{league}",
+        )
+        st.markdown(f"## {chosen}")
+        sections = players.stat_sections(logs, chosen)
+        if not sections:
+            st.write("This feed has no game stats logged for him yet.")
+        for section in sections:
+            st.markdown("---")
+            st.subheader(section.label)
+            s1, s2, s3 = st.columns(3)
+            s1.metric("Games logged", section.games)
+            s2.metric("Season average", f"{section.season_avg:.1f}")
+            s3.metric("Last 5 average", f"{section.last5_avg:.1f}")
+            line = st.number_input(
+                f"Test a line — {section.label}",
+                min_value=0.0,
+                step=0.5,
+                value=float(section.default_line),
+                key=(
+                    f"line-{league}-"
+                    f"{game_logs.normalize_name(chosen)}-{section.label}"
+                ),
+            )
+            check = game_logs.summarize(section.values, "Over", float(line))
+            if check is not None:
+                st.write(
+                    f"**Over {line:g} in {check.hits} of his last "
+                    f"{check.games} games.**"
+                )
+            chart_rows = breakdown.form_chart_rows(section.last10)
+            try:
+                import altair as _alt
+                import pandas as _pd
+
+                _df = _pd.DataFrame(chart_rows)
+                _bars = _alt.Chart(_df).mark_bar(color="#7b2fbe").encode(
+                    x=_alt.X("game:N", sort=None, title="Recent games"),
+                    y=_alt.Y("value:Q", title=section.label),
+                )
+                _rule = _alt.Chart(
+                    _pd.DataFrame({"line": [float(line)]})
+                ).mark_rule(color="#e74c3c", strokeDash=[6, 4]).encode(y="line:Q")
+                st.altair_chart(_bars + _rule, use_container_width=True)
+                st.caption(
+                    "Last 10 games, oldest to newest. Red dashed line = "
+                    "the line you're testing."
+                )
+            except Exception:
+                st.bar_chart(chart_rows, x="game", y="value")
+                st.caption(
+                    f"Last 10 games, oldest to newest. The line you're "
+                    f"testing: {line:g}."
+                )
 
 # ================= LILLY =================
 elif page == "💜 Lilly":
