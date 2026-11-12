@@ -73,7 +73,8 @@ purpose (never more than 10 points, and less when the
 sample is small), it is written on the pick itself, and my
 lessons and my Brier score are on the Results page where
 anyone can grade whether the learning is actually helping.
-Demo picks never teach me — sample data is not a record.
+Only my own settled live picks teach me — that is the
+record I learn from.
 Recalibrating makes my numbers more honest. It does not
 make them promises.
 """
@@ -174,10 +175,11 @@ def chat_reply(message: str) -> str:
         )
     if any(w in text for w in ("demo", "sample", "offline")):
         return (
-            "Demo mode uses sample players and sample odds so you can see how "
-            "everything works. It is clearly labelled DEMO on every page, and "
-            "those are NOT live picks. Add the free Odds API key in Setup and "
-            "I will switch to live props."
+            "There's no demo mode here any more — this app only ever "
+            "shows live picks, for King and Kohen. If no picks are "
+            "showing, the Odds API key needs adding in Streamlit "
+            "Secrets; after that, one pull stores the slate until "
+            "you pull fresh odds again."
         )
     if any(w in text for w in ("hi", "hello", "hey", "who are you")):
         return (

@@ -366,8 +366,8 @@ class OddsApiClient:
         if not self.has_key:
             return ApiResult(
                 False,
-                "No API key set — running in demo mode. "
-                "Add the free key in Setup to get live props.",
+                "No API key set. Add your Odds API key in "
+                "Streamlit Secrets to pull live props.",
             )
         try:
             events_resp = self._get(f"/sports/{SPORT_KEYS[sport]}/events", {})

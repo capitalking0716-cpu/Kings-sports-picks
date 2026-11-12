@@ -158,9 +158,6 @@ def test_make_form_lookup_rules():
     # v2: the lookup hands scoring the RAW LOG VALUES (newest
     # first) for the projection model — not a hit-rate count.
     assert lookup(live) == [250.0, 300.0, 200.0]
-    demo = Prop(player="Patrick Mahomes", sport="NFL", prop="Passing Yards",
-                side="Over", line=249.5, odds=-110, source="demo")
-    assert lookup(demo) is None  # demo NEVER acquires form
     unknown = Prop(player="Ghost Player", sport="NFL", prop="Passing Yards",
                    side="Over", line=249.5, odds=-110, source="live")
     assert lookup(unknown) is None
@@ -385,12 +382,23 @@ def _login_as_king(at):
     return at
 
 
-def test_app_props_page_shows_board_and_breakdown_after_demo_run():
+def test_app_props_page_shows_board_and_breakdown_after_live_run():
+    # A live-scored board injected the way the sibling test
+    # below does it (demo mode was removed 2026-11-12, so
+    # there is no sample run to click through any more).
+    from kings_picks.model import score_prop
+
     at = _login_as_king(_run_app(FAKE_SECRETS))
-    run = [b for b in at.button if "Run the algorithm" in b.label]
-    assert run, "no Run button on Dashboard"
-    run[0].click().run()
-    assert not at.exception, f"app raised: {at.exception}"
+    raw = [
+        Prop(player="Fixture Star", sport="NBA", prop="Points",
+             side=side, line=24.5, odds=-110, bookmaker="FixtureBook",
+             event="Team A vs Team B", source="live")
+        for side in ("Over", "Under")
+    ]
+    at.session_state["scored"] = [score_prop(raw[0], pair_odds=-110)]
+    at.session_state["raw_props"] = raw
+    at.session_state["parlays"] = []
+    at.session_state["mode"] = "live"
     list(at.radio)[0].set_value("Props").run()
     assert not at.exception, f"app raised: {at.exception}"
     subheads = [s.value for s in at.subheader]
@@ -398,7 +406,7 @@ def test_app_props_page_shows_board_and_breakdown_after_demo_run():
     assert any("Player breakdown" in s for s in subheads)
     boxes = list(at.selectbox)
     assert boxes, "player picker missing"
-    assert "Sample Star" in boxes[0].options
+    assert "Fixture Star" in boxes[0].options
 
 
 def test_app_props_breakdown_shows_recent_form_when_feed_matched():

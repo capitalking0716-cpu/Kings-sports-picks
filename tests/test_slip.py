@@ -218,14 +218,19 @@ def test_manual_picks_in_stats_are_separate_from_lilly(tmp_path):
     assert stats["played"]["settled"] == 1
 
 
-def test_manual_demo_save_stays_demo(tmp_path):
-    log = PickLog(tmp_path / "pick_log.json")
-    added, _ = log.record_manual([leg()], mode="demo", profile="King",
-                                 created=TODAY)
-    assert added[0].mode == "demo" and added[0].source == "manual"
-    stats = log.stats(profile="King")
-    assert stats["total"] == 0 and stats["manual"]["total"] == 0
-    assert stats["demo"]["total"] == 1  # demo block, never the record
+def test_manual_demo_save_is_purged_on_reload(tmp_path):
+    # Demo mode was removed 2026-11-12. A demo-tagged manual
+    # entry saved by the old build is sample data, not a
+    # record: loading the log again drops it permanently,
+    # while live entries (manual ones included) stay.
+    path = tmp_path / "pick_log.json"
+    log = PickLog(path)
+    log.record_manual([leg()], mode="demo", profile="King", created=TODAY)
+    log.record_manual([leg(player="B", line=5.5)], mode="live",
+                      profile="King", created=TODAY)
+    reloaded = PickLog(path)
+    assert [e.player for e in reloaded.entries] == ["B"]
+    assert reloaded.stats(profile="King")["manual"]["total"] == 1
 
 
 # ---------- manual picks never teach Lilly ----------
@@ -306,8 +311,55 @@ def _login_as_king(at):
     return at
 
 
-def test_app_my_slip_page_builds_and_saves_demo_slip():
+def _install_fake_client(monkeypatch):
+    """A fake live OddsApiClient: a small fixture board, no
+    network, no quota (demo data is gone — the board in
+    tests is a LIVE board from this fixture)."""
+    from kings_picks.model import Prop
+    from kings_picks.odds_api import AltResult, ApiResult, OddsApiClient
+
+    props = []
+    for i in range(14):
+        for side in ("Over", "Under"):
+            props.append(Prop(
+                player=f"Fixture{i}", sport="NBA", prop="Points",
+                side=side, line=10.5 + i, odds=-110 - (i % 5) * 10,
+                bookmaker="FixtureBook", event=f"Team{i} vs Team{i + 1}",
+                event_id="evt-fixture", source="live",
+            ))
+
+    def fetch_props(self, sport, force_refresh=False, max_events=12):
+        return ApiResult(
+            True, "fixture props",
+            props=[p for p in props if p.sport == sport],
+            requests_remaining="499 of 500 requests left this month (1 used)",
+        )
+
+    monkeypatch.setattr(OddsApiClient, "has_key", property(lambda self: True))
+    monkeypatch.setattr(OddsApiClient, "fetch_props", fetch_props)
+    monkeypatch.setattr(
+        OddsApiClient, "fetch_alternates",
+        lambda self, sport, event_id, market_key, force_refresh=False:
+            AltResult(True, "fixture alternates", prices=[]),
+    )
+    monkeypatch.setattr(
+        OddsApiClient, "resolve_event_id",
+        lambda self, sport, event_label, commence_time="": "evt-fixture",
+    )
+
+
+class _FakeStore:
+    def nfl_logs(self):
+        return None
+
+    def nba_logs(self):
+        return None
+
+
+def test_app_my_slip_page_builds_and_saves_a_slip(monkeypatch):
     at = _login_as_king(_run_app(FAKE_SECRETS))
+    _install_fake_client(monkeypatch)
+    at.session_state["stats_store"] = _FakeStore()
     radios = list(at.radio)
     assert radios, "app page radio missing after login"
     radios[0].set_value("🎟️ My Slip").run()
@@ -320,19 +372,22 @@ def test_app_my_slip_page_builds_and_saves_demo_slip():
     )
     assert "My Slip" in text
     assert "calculator" in text  # the honest note is on the page
-    # No key in tests -> demo mode: the board loads on demand.
+    # The board loads on demand — the same stored-slate pull
+    # as the Dashboard, here with the fixture client.
     load = [b for b in at.button if "Load today's board" in b.label]
     assert load, "board load button missing"
     load[0].click().run()
     assert not at.exception, f"app raised: {at.exception}"
     add = [b for b in at.button if b.label == "➕ Add to slip"]
-    assert add, "no Add to slip buttons on the demo board"
+    assert add, "no Add to slip buttons on the board"
     add[0].click().run()
     assert not at.exception, f"app raised: {at.exception}"
-    # The slip now shows the combined-odds maths and a stake box.
-    metric_labels = {m.label for m in at.metric}
-    assert "Combined odds" in metric_labels
-    assert "True overall chance" in metric_labels
+    # The slip prints as a bet ticket with the totals in it,
+    # and the stake box is there to price it.
+    tickets = "\n".join(m.value for m in at.markdown if "bet-ticket" in m.value)
+    assert "MY SLIP" in tickets
+    assert "Combined odds:" in tickets
+    assert "True overall chance:" in tickets
     assert any(ni.key == "slip_stake_King" for ni in at.number_input)
     save = [b for b in at.button if "Save slip" in b.label]
     assert save, "save button missing"

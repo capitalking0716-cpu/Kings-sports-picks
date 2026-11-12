@@ -12,12 +12,12 @@ from datetime import datetime, timedelta
 
 import streamlit as st
 
-from kings_picks import breakdown, demo_data, game_logs, king_style, learning, lilly, players, profiles, projection, slip
+from kings_picks import breakdown, game_logs, king_style, learning, lilly, players, profiles, projection, self_test, slate_store, slip
 from kings_picks.ledger import Ledger
-from kings_picks.model import SCORING_VERSION, score_prop
+from kings_picks.model import SCORING_VERSION, decimal_to_american, score_prop
 from kings_picks.odds_api import OddsApiClient, market_key_for_label
 from kings_picks.parlays import build_parlays
-from kings_picks.pick_log import PickLog
+from kings_picks.pick_log import PickLog, entry_stamp, now_stamp
 
 st.set_page_config(
     page_title="Kings Sports Books Picks",
@@ -41,11 +41,6 @@ st.markdown(
     }
     .stButton > button:hover { background-color: #9b4fd8 !important; }
     div[data-testid="stMetricValue"] { color: #d4af37; }
-    .demo-banner {
-        background-color: #3d2b00; border: 2px solid #d4af37;
-        color: #ffe08a; padding: 14px; border-radius: 12px;
-        font-size: 20px; font-weight: bold; text-align: center;
-    }
     .live-banner {
         background-color: #12351f; border: 2px solid #2ecc71;
         color: #b6f5cd; padding: 14px; border-radius: 12px;
@@ -59,6 +54,21 @@ st.markdown(
         background-color: #1c1026; border: 1px solid #7b2fbe;
         border-radius: 12px; padding: 12px; margin-bottom: 10px;
     }
+    .bet-ticket {
+        background-color: #f6f1e3; color: #1a1426;
+        border: 2px solid #d4af37; border-radius: 10px;
+        padding: 14px 16px; margin-bottom: 14px;
+        font-family: "Courier New", Courier, monospace;
+    }
+    .bet-ticket .ticket-head {
+        font-size: 20px; font-weight: bold; text-align: center;
+        letter-spacing: 1px; color: #1a1426 !important;
+    }
+    .bet-ticket .ticket-sub { text-align: center; font-size: 14px; }
+    .bet-ticket .ticket-perf { border-top: 2px dashed #8a7f5c; margin: 10px 0; }
+    .bet-ticket .ticket-leg { margin: 9px 0; font-size: 15px; }
+    .bet-ticket .ticket-foot { font-size: 15px; margin: 3px 0; }
+    .bet-ticket .ticket-terms { font-size: 12.5px; font-style: italic; margin-top: 8px; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -225,28 +235,39 @@ LEARNING = learning.LearningEngine(
     f"{DATA_DIR}/learned.json", f"{DATA_DIR}/lilly-lessons.jsonl"
 )
 SLIP_BOOK = slip.SlipBook(f"{DATA_DIR}/slips.json")
+SLATE_STORE = slate_store.SlateStore(f"{DATA_DIR}/current_slate.json")
 
 
 def get_client() -> OddsApiClient:
     return OddsApiClient(cache_dir=f"{DATA_DIR}/cache")
 
 
+# The whole no-key state, in one plain sentence. There is
+# no demo mode and there are no sample picks: without a key
+# the app simply has no props to show.
+SETUP_NOTE = "Add your Odds API key in Streamlit Secrets to pull live props."
+
+
 def load_props(force_refresh: bool = False):
-    """Live props if a key is set, else clearly-labelled demo data."""
+    """Live props, or an honest empty result.
+
+    Returns (props, mode, note) with mode "live", "no_key"
+    or "failed". No key -> no props and the setup note. A
+    failed fetch -> no props and the failure note. Lilly
+    never falls back to invented/sample data.
+    """
     client = get_client()
     if not client.has_key:
-        return demo_data.demo_props(), "demo", (
-            "DEMO MODE — no API key set. These are SAMPLE picks, not live picks. "
-            "Add the free key in Setup to get live props."
-        )
+        return [], "no_key", f"No Odds API key set. {SETUP_NOTE}"
     result = client.fetch_props("NBA", force_refresh=force_refresh)
     props = list(result.props)
     nfl = client.fetch_props("NFL", force_refresh=force_refresh)
     props.extend(nfl.props)
-    if not result.ok and not props:
-        return demo_data.demo_props(), "demo", (
-            f"LIVE DATA FAILED: {result.message} Showing clearly-labelled DEMO picks instead — "
-            "these are NOT live picks."
+    if not props:
+        message = result.message if not result.ok else nfl.message
+        return [], "failed", (
+            f"LIVE DATA FAILED: {message} "
+            "No picks were built from that pull."
         )
     note = result.message
     if nfl.requests_remaining:
@@ -276,14 +297,15 @@ def _form_lookup_for(mode: str):
     """The game-log lookup for one run, or None.
 
     Only LIVE runs ever touch the free stats feeds (nflverse
-    for the NFL, stats.nba.com for the NBA) — demo runs must
-    never acquire form data, and any feed failure just means
-    this run stays odds-only. The lookup hands score_all the
-    raw log values each projection is built from. The loaded
-    logs are stashed in session state so the Props page
-    breakdown can show the same form the scoring used. The
-    feeds come through the shared store (_get_stats_store) —
-    the exact same data the Players page browses.
+    for the NFL, stats.nba.com for the NBA) — a run that
+    isn't live must never acquire form data, and any feed
+    failure just means this run stays odds-only. The lookup
+    hands score_all the raw log values each projection is
+    built from. The loaded logs are stashed in session state
+    so the Props page breakdown can show the same form the
+    scoring used. The feeds come through the shared store
+    (_get_stats_store) — the exact same data the Players
+    page browses.
     """
     if mode != "live":
         return None
@@ -303,13 +325,13 @@ def _form_lookup_for(mode: str):
 def _learning_lookup_for(mode: str):
     """Lilly's learned corrections for one run, or None.
 
-    Only LIVE runs learn or get corrected: the corrections are
-    derived from settled live picks, and demo picks (sample
-    data, invented probabilities) must never be blended with
-    her real record in either direction. Refreshing first
-    folds in every pick settled since the last run — this
-    reads the on-disk pick log only; the Odds API is never
-    touched by learning.
+    Only LIVE runs learn or get corrected: the corrections
+    are derived from settled live picks, and a run that
+    isn't live must never be blended with her real record
+    in either direction. Refreshing first folds in every
+    pick settled since the last run — this reads the
+    on-disk pick log only; the Odds API is never touched
+    by learning.
     """
     if mode != "live":
         return None
@@ -418,11 +440,10 @@ def _render_drop_options(pick, active_profile):
     mode = st.session_state["mode"]
     market_key = market_key_for_label(pick.prop)
     alt_prices = []
-    if mode != "live" or market_key is None:
+    if market_key is None:
         st.info(
-            "Dropped lines are priced from the books' live alternate "
-            "markets — they show here on live boards, when a book "
-            "offers them."
+            "No alternate market exists for this prop, so there are "
+            "no dropped lines to price for it."
         )
     else:
         client = get_client()
@@ -497,15 +518,40 @@ def _render_drop_options(pick, active_profile):
             )
 
 
+def _ticket_number(seed_text: str) -> str:
+    """A stable ticket number from the ticket's own content:
+    the same picks always print the same number — after a
+    reload from the stored slate included — and different
+    picks print a different one."""
+    import hashlib
+
+    digest = hashlib.sha256(seed_text.encode("utf-8")).hexdigest()
+    return f"KSB-{digest[:8].upper()}"
+
+
 def render_parlay(parlay, mode: str):
-    st.markdown(f"### 👑 {parlay.label} — wins about {parlay.overall_probability:.1%} of the time")
-    st.markdown(
-        f"**True overall chance: {parlay.overall_probability:.2%}** "
-        f"(about 1 in {parlay.one_in:.0f}) &nbsp;|&nbsp; "
-        f"If all legs win, $1 staked returns ${parlay.decimal_payout:.2f} &nbsp;|&nbsp; "
-        f"Expected value per $1: **${parlay.expected_value_per_dollar:+.2f}**"
+    """One parlay as an authentic bet ticket.
+
+    Same data the old cards showed — every field — laid out
+    like a sportsbook slip: shop header, ticket number, the
+    pull's timestamp, one row per leg (with the King legs'
+    dropped/raised notes), dashed perforations, and a footer
+    with the totals and Lilly's honest line as the terms.
+    """
+    style_tag = (
+        "👑 KING'S STYLE"
+        if getattr(parlay, "style", "standard") == "king"
+        else "STANDARD LINES"
     )
-    st.info(parlay.plain_summary())
+    pulled = slate_store.format_pulled_at(st.session_state.get("pulled_at", ""))
+    pulled_line = f"Pulled {pulled}" if pulled else "Pulled this session"
+    number = _ticket_number(
+        "|".join(
+            [parlay.label, getattr(parlay, "style", "standard")]
+            + [f"{p.key}:{p.odds}" for p in parlay.picks]
+        )
+    )
+    legs_html = ""
     for pick in parlay.picks:
         verdict, reason = lilly.verdict_for_pick(pick.probability, pick.has_form_data, pick.edge)
         odds_only = "⚠️ Odds-only — no recent-form data" if not pick.has_form_data else "✅ Recent form included"
@@ -521,18 +567,184 @@ def render_parlay(parlay, mode: str):
             title = f"{pick.label} ({verb} from {float(base_line):g})"
         king_note = getattr(pick, "king_note", "") or ""
         king_html = f"<i>👑 {king_note}</i><br>" if king_note else ""
-        st.markdown(
-            f"<div class='pick-card'>"
-            f"<b style='font-size:18px'>{title}</b><br>"
+        legs_html += (
+            f"<div class='ticket-leg'>"
+            f"<b>{title}</b><br>"
             f"Odds: {pick.odds:+d} &nbsp;|&nbsp; Chance: <b>{pick.probability:.0%}</b> &nbsp;|&nbsp; "
             f"{pick.bookmaker or ''} &nbsp;|&nbsp; {pick.event}<br>"
             f"{odds_only}<br>"
             f"{king_html}"
             f"<i>{pick.why}</i><br>"
             f"<b>Lilly's verdict: {verdict}</b> — {reason}"
-            f"</div>",
-            unsafe_allow_html=True,
+            f"</div>"
         )
+    try:
+        combined_american = f"{decimal_to_american(parlay.decimal_payout):+d}"
+    except ValueError:
+        combined_american = "—"
+    st.markdown(
+        f"<div class='bet-ticket'>"
+        f"<div class='ticket-head'>👑 KINGS SPORTS BOOKS PICKS</div>"
+        f"<div class='ticket-sub'><b>{parlay.label}</b> — wins about "
+        f"{parlay.overall_probability:.1%} of the time</div>"
+        f"<div class='ticket-sub'>Ticket #{number} &nbsp;·&nbsp; {pulled_line}</div>"
+        f"<div class='ticket-sub'>{style_tag} &nbsp;·&nbsp; Model {SCORING_VERSION}</div>"
+        f"<div class='ticket-perf'></div>"
+        f"{legs_html}"
+        f"<div class='ticket-perf'></div>"
+        f"<div class='ticket-foot'><b>True overall chance: "
+        f"{parlay.overall_probability:.2%}</b> (about 1 in {parlay.one_in:.0f})</div>"
+        f"<div class='ticket-foot'>Combined odds: <b>{combined_american}</b> "
+        f"(decimal {parlay.decimal_payout:.2f}) &nbsp;|&nbsp; "
+        f"If all legs win, $1 staked returns ${parlay.decimal_payout:.2f}</div>"
+        f"<div class='ticket-foot'>Expected value per $1: "
+        f"<b>${parlay.expected_value_per_dollar:+.2f}</b></div>"
+        f"<div class='ticket-terms'>{parlay.plain_summary()}</div>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def _render_slip_ticket(legs, summary, profile):
+    """A hand-built My Slip slip, printed as a bet ticket —
+    the same ticket language as Lilly's parlay tickets, and
+    every number the old metric row showed: combined odds
+    (American + decimal), the true overall chance with its
+    1-in-X, the stake, the payout, the profit, and the
+    expected value (Lilly's chance × the payout − the stake).
+    """
+    number = _ticket_number(
+        "slip|" + profile + "|" + "|".join(f"{leg.key}:{leg.odds}" for leg in legs)
+    )
+    pulled = slate_store.format_pulled_at(st.session_state.get("pulled_at", ""))
+    pulled_line = f"Board pulled {pulled}" if pulled else "Built from today's board"
+    legs_html = ""
+    for leg in legs:
+        form_tag = "✅ Recent form included" if leg.has_form_data else "⚠️ Odds-only — no recent-form data"
+        legs_html += (
+            f"<div class='ticket-leg'>"
+            f"<b>{leg.label}</b> — {leg.sport}<br>"
+            f"Odds: {leg.odds:+d} &nbsp;|&nbsp; Lilly's chance: <b>{leg.probability:.0%}</b> &nbsp;|&nbsp; "
+            f"{leg.bookmaker or ''} &nbsp;|&nbsp; {leg.event}<br>"
+            f"{form_tag}"
+            f"</div>"
+        )
+    american = (
+        f"{summary['american_odds']:+d}"
+        if summary["american_odds"] is not None
+        else "—"
+    )
+    one_in = f"{summary['one_in']:.0f}" if summary["one_in"] else "—"
+    st.markdown(
+        f"<div class='bet-ticket'>"
+        f"<div class='ticket-head'>👑 KINGS SPORTS BOOKS PICKS</div>"
+        f"<div class='ticket-sub'><b>MY SLIP</b> — "
+        f"{profiles.PROFILE_LABELS[profile]}'s ticket</div>"
+        f"<div class='ticket-sub'>Ticket #{number} &nbsp;·&nbsp; {pulled_line}</div>"
+        f"<div class='ticket-sub'>HAND-BUILT &nbsp;·&nbsp; Model {SCORING_VERSION}</div>"
+        f"<div class='ticket-perf'></div>"
+        f"{legs_html}"
+        f"<div class='ticket-perf'></div>"
+        f"<div class='ticket-foot'>Combined odds: <b>{american}</b> "
+        f"(decimal {summary['decimal_odds']:.2f} — what $1 returns if every leg wins)</div>"
+        f"<div class='ticket-foot'><b>True overall chance: "
+        f"{summary['overall_probability']:.1%}</b> (about 1 in {one_in}) — "
+        f"Lilly's estimate: her chance for each leg, multiplied together</div>"
+        f"<div class='ticket-foot'>Bet amount: <b>${summary['stake']:.2f}</b> &nbsp;|&nbsp; "
+        f"If it hits, you get back <b>${summary['payout']:.2f}</b> &nbsp;|&nbsp; "
+        f"Profit: <b>${summary['profit']:.2f}</b></div>"
+        f"<div class='ticket-foot'>Expected value at this amount: "
+        f"<b>${summary['expected_value']:+.2f}</b> "
+        f"(her chance × the payout − your stake)</div>"
+        f"<div class='ticket-terms'>Paper tracking only — Lilly doesn't place "
+        f"bets. Odds are as shown when each leg was added; the real book's "
+        f"price at bet time is the one that counts.</div>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def _self_test_logs() -> dict:
+    """The game logs the self-test grades against: the ones the
+    last live run already loaded (stashed in session state by
+    _form_lookup_for), else the shared stats store — the same
+    free feeds, the same disk cache, ZERO Odds API quota.
+    Fail-soft like everything form-shaped: any problem means
+    no logs, and every grade simply reads NO DATA."""
+    nfl = st.session_state.get("nfl_logs")
+    nba = st.session_state.get("nba_logs")
+    if nfl is None and nba is None:
+        try:
+            store = _get_stats_store()
+            nfl = store.nfl_logs()
+            nba = store.nba_logs()
+        except Exception:
+            return {}
+    return {"NFL": nfl, "NBA": nba}
+
+
+def render_self_test():
+    """🧪 Lilly tests her picks — the Dashboard self-test.
+
+    Grades the CURRENT slate from the pick log (her latest
+    logged generation: standard and 👑 King-style legs at the
+    lines they played) against each player's recent game-log
+    form. Read-only reporting: it never changes a pick, a
+    chance, or the learning loop — she tests herself and shows
+    the marks alongside her picks (kings_picks/self_test.py).
+    """
+    slate = self_test.latest_slate(PICK_LOG.entries)
+    with st.expander("🧪 Lilly tests her picks", expanded=False):
+        st.caption(
+            "Lilly grades her own picks against each player's recent "
+            "game-log form: in his last 10 games, how often would this "
+            "exact pick have hit? This checks past-game form only — it "
+            "is not a promise about tonight, and it never changes her "
+            "picks. It reports alongside them."
+        )
+        if not slate:
+            st.info(
+                "No picks logged yet — run the algorithm and Lilly "
+                "will grade her picks here."
+            )
+            return
+        grades = self_test.grade_slate(PICK_LOG.entries, _self_test_logs())
+        counts = self_test.verdict_counts(grades)
+        summary = " · ".join(
+            f"{counts[tag]} {tag}"
+            for tag in (
+                self_test.STRONG,
+                self_test.LEAN,
+                self_test.MIXED,
+                self_test.SHAKY,
+                self_test.NO_DATA,
+            )
+            if tag in counts
+        )
+        st.write(
+            f"**{len(grades)} picks graded** (logged {slate[0].date}) — {summary}"
+        )
+        for grade in grades:
+            king_tag = " &nbsp;👑 King's style" if grade.style == "king" else ""
+            chance = (
+                f"{grade.stated_chance:.0%}"
+                if grade.stated_chance is not None
+                else "—"
+            )
+            full = (
+                f"{grade.full_rate:.0%} over the full log"
+                if grade.full_rate is not None
+                else "full log: no decided games"
+            )
+            st.markdown(
+                f"<div class='pick-card'>"
+                f"<b style='font-size:18px'>{grade.label}</b>{king_tag}<br>"
+                f"Lilly's chance: <b>{chance}</b> &nbsp;|&nbsp; "
+                f"Last-10 form: <b>{grade.form_label}</b> &nbsp;|&nbsp; "
+                f"{full} &nbsp;|&nbsp; <b>{grade.verdict_display}</b>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
 
 
 # ---- Sidebar ----
@@ -561,10 +773,33 @@ st.sidebar.markdown(
     "Sports betting in Michigan is 21+."
 )
 
-# ---- Shared state: today's parlays ----
+# ---- Shared state: the stored slate ----
+# A pull PERSISTS (kings_picks/slate_store.py): the slate —
+# board, Lilly's parlays and the 👑 King parlays, the picks
+# exactly as pulled — is saved to data/current_slate.json,
+# and a fresh app load renders the STORED slate with no
+# Odds API call and no rescore. It stays until Neko pulls
+# fresh odds; only a pull replaces it.
+def _apply_stored_slate(payload) -> bool:
+    """Put a stored slate into session state for rendering.
+    False (nothing changed) when there is no usable slate."""
+    restored = slate_store.restore_slate(payload)
+    if restored is None:
+        return False
+    st.session_state["parlays"] = restored["parlays"]
+    st.session_state["king_parlays"] = restored["king_parlays"]
+    st.session_state["king_info"] = restored["king_info"]
+    st.session_state["scored"] = restored["scored"]
+    st.session_state["raw_props"] = restored["raw_props"]
+    st.session_state["mode"] = "live"
+    st.session_state["note"] = restored["note"]
+    st.session_state["pulled_at"] = restored["pulled_at"]
+    return True
+
+
 if "parlays" not in st.session_state:
     st.session_state["parlays"] = []
-    st.session_state["mode"] = "demo"
+    st.session_state["mode"] = "no_key"
     st.session_state["note"] = ""
 if "king_parlays" not in st.session_state:
     st.session_state["king_parlays"] = []
@@ -573,10 +808,38 @@ if "scored" not in st.session_state:
     st.session_state["scored"] = []
 if "raw_props" not in st.session_state:
     st.session_state["raw_props"] = []
+if "pulled_at" not in st.session_state:
+    # First run of a fresh session: render the stored slate,
+    # if one was ever pulled. No fetch, no scoring — the
+    # store IS the slate until the next pull.
+    st.session_state["pulled_at"] = ""
+    _apply_stored_slate(SLATE_STORE.load())
 
 
 def run_algorithm(force_refresh: bool = False):
     props, mode, note = load_props(force_refresh=force_refresh)
+    if mode != "live":
+        # No key, or the live fetch failed: Lilly never
+        # invents picks. A stored slate, if one exists, stays
+        # on screen exactly as pulled — this pull replaces
+        # nothing, records nothing, stores nothing.
+        if _apply_stored_slate(SLATE_STORE.load()):
+            st.session_state["note"] += (
+                f" | ⚠️ That pull didn't come back live — {note} "
+                "Your stored slate above is still the one showing, "
+                "exactly as pulled."
+            )
+            return st.session_state["parlays"], "live", st.session_state["note"]
+        st.session_state["parlays"] = []
+        st.session_state["king_parlays"] = []
+        st.session_state["king_info"] = {}
+        st.session_state["scored"] = []
+        st.session_state["raw_props"] = []
+        st.session_state["mode"] = mode
+        st.session_state["note"] = note
+        st.session_state["pulled_at"] = ""
+        return [], mode, note
+
     form_lookup = _form_lookup_for(mode)
     learning_lookup = _learning_lookup_for(mode)
     scored = score_all(
@@ -590,14 +853,12 @@ def run_algorithm(force_refresh: bool = False):
     st.session_state["note"] = note + (" | " + " | ".join(build_notes) if build_notes else "")
 
     # 👑 King's style: the same parlays rebuilt at Neko's
-    # dropped lines (kings_picks/king_style.py). LIVE runs
+    # dropped lines (kings_picks/king_style.py). Live pulls
     # only — dropped lines are priced from the books' real
-    # alternate markets, and demo has none, so demo builds
-    # nothing here and the Dashboard shows one explainer
-    # line instead. QUOTA: alternates are fetched ONLY for
-    # the unique (event, market) pairs inside the final
-    # parlays, through the disk-cached client — never
-    # slate-wide.
+    # alternate markets, and Lilly does not invent them.
+    # QUOTA: alternates are fetched ONLY for the unique
+    # (event, market) pairs inside the final parlays,
+    # through the disk-cached client — never slate-wide.
     king_parlays: list = []
     king_info: dict = {}
     if mode == "live" and parlays:
@@ -625,13 +886,37 @@ def run_algorithm(force_refresh: bool = False):
     st.session_state["king_parlays"] = king_parlays
     st.session_state["king_info"] = king_info
 
+    # One instant stamps the whole pull: the pick-log
+    # entries and the stored slate carry the same time, so
+    # the record and the screen always agree on when these
+    # picks were pulled.
+    pulled_at = now_stamp()
     if parlays:
         LEDGER.record_run(parlays, mode, profile=active_profile, model=SCORING_VERSION)
         # Standard legs first: a King leg kept at the standard
         # line IS the standard pick (same log key), so it is
         # logged once, as standard; dropped King legs log
         # separately, tagged style="king", source="lilly".
-        PICK_LOG.record_run(parlays + king_parlays, mode, model=SCORING_VERSION)
+        PICK_LOG.record_run(
+            parlays + king_parlays, mode, model=SCORING_VERSION,
+            created_at=pulled_at,
+        )
+
+    # Persist the pulled slate (board + both parlay sets,
+    # exactly as rendered) — later loads render THIS, with
+    # no API call and no rescore, until the next pull.
+    SLATE_STORE.save(
+        slate_store.build_payload(
+            pulled_at=pulled_at,
+            note=st.session_state["note"],
+            raw_props=props,
+            scored=scored,
+            parlays=parlays,
+            king_parlays=king_parlays,
+            king_info=king_info,
+        )
+    )
+    st.session_state["pulled_at"] = pulled_at
     return parlays, mode, note
 
 
@@ -640,15 +925,21 @@ if page == "Dashboard":
     st.title("👑 Kings Sports Books Picks")
     st.subheader("Today's parlays — built by Lilly")
 
-    if st.session_state["mode"] == "demo":
-        st.markdown(
-            "<div class='demo-banner'>⚠️ DEMO MODE — SAMPLE PICKS ONLY, NOT LIVE</div>",
-            unsafe_allow_html=True,
-        )
-    elif st.session_state["parlays"]:
+    if st.session_state["parlays"]:
         st.markdown(
             "<div class='live-banner'>✅ LIVE PROPS — from The Odds API</div>",
             unsafe_allow_html=True,
+        )
+    if not get_client().has_key:
+        st.info(f"🔑 {SETUP_NOTE}")
+    pulled_at = st.session_state.get("pulled_at", "")
+    if pulled_at:
+        pulled_when = slate_store.format_pulled_at(pulled_at)
+        pulled_text = f" — pulled {pulled_when}" if pulled_when else ""
+        st.caption(
+            f"📌 **Stored slate{pulled_text}.** These picks are saved in "
+            "the app: they stay exactly as pulled until you tap "
+            "**🔄 Pull fresh odds**, and only a fresh pull replaces them."
         )
     if st.session_state["note"]:
         st.write(st.session_state["note"])
@@ -658,23 +949,22 @@ if page == "Dashboard":
             run_algorithm(force_refresh=False)
         st.success("Done. Parlays saved to the ledger.")
 
-    if st.button("↻ Refresh live props (uses API quota — tap only when you want fresh lines)"):
+    if st.button("🔄 Pull fresh odds (uses API quota — tap only when you want fresh lines)"):
         with st.spinner("Fetching fresh live props..."):
             run_algorithm(force_refresh=True)
         st.success("Refreshed.")
 
     if not st.session_state["parlays"]:
         st.markdown(
-            "<div class='warn-box'>No parlays built yet. Tap <b>Run the algorithm</b> above. "
-            "Without an API key this builds DEMO parlays from sample data.</div>",
+            "<div class='warn-box'>No parlays built yet. Tap <b>Run the algorithm</b> above "
+            "to pull today's live props. The pull is stored — the picks stay on this "
+            "screen until you pull fresh odds.</div>",
             unsafe_allow_html=True,
         )
     else:
         # 👑 King's style leads: Neko's dropped-line rebuild
-        # of the same parlays. Live runs build it for real;
-        # demo can't (no real alternate prices exist there),
-        # so demo shows one explainer line instead of
-        # invented dropped parlays.
+        # of the same parlays, priced from the books' real
+        # alternate markets on the live pull that built them.
         st.subheader("👑 King's style — dropped lines")
         king_parlays = st.session_state.get("king_parlays", [])
         if king_parlays:
@@ -688,26 +978,22 @@ if page == "Dashboard":
             for king_parlay in king_parlays:
                 render_parlay(king_parlay, st.session_state["mode"])
                 st.markdown("---")
-        elif st.session_state["mode"] != "live":
-            st.info(
-                "👑 King's style is built from the books' live alternate "
-                "lines — it appears on live slates only. Demo has no real "
-                "alternate prices, so Lilly won't invent dropped parlays here."
-            )
         st.subheader("Lilly's standard lines")
         for parlay in st.session_state["parlays"]:
             render_parlay(parlay, st.session_state["mode"])
             st.markdown("---")
 
+    # 🧪 Lilly tests her picks: her latest logged slate,
+    # graded against recent game-log form. Rendered from the
+    # pick log (not session state), so the grades are here
+    # even on a fresh app load — and an empty log just shows
+    # the "no picks yet" line inside the expander.
+    render_self_test()
+
 # ================= PROPS =================
 elif page == "Props":
     st.title("📋 Props")
     st.write("Every prop Lilly can see right now, with its chance and why it was picked.")
-    if st.session_state["mode"] == "demo" and st.session_state["scored"]:
-        st.markdown(
-            "<div class='demo-banner'>⚠️ DEMO MODE — SAMPLE PROPS, NOT LIVE</div>",
-            unsafe_allow_html=True,
-        )
     if not st.session_state["scored"]:
         st.write("No props loaded yet. Go to the Dashboard and tap **Run the algorithm**.")
     else:
@@ -846,12 +1132,8 @@ elif page == "🎟️ My Slip":
         "pay if every leg hits."
     )
     st.info(slip.CALCULATOR_NOTE)
-    if st.session_state["mode"] == "demo":
-        st.markdown(
-            "<div class='demo-banner'>⚠️ DEMO MODE — SAMPLE PROPS, NOT LIVE. "
-            "Anything you build and save here is sample record only.</div>",
-            unsafe_allow_html=True,
-        )
+    if not get_client().has_key:
+        st.info(f"🔑 {SETUP_NOTE}")
     flash = st.session_state.pop("slip_flash", None)
     if flash:
         st.success(flash)
@@ -868,20 +1150,6 @@ elif page == "🎟️ My Slip":
             "each profile keeps its own slip."
         )
     else:
-        for leg in my_legs:
-            form_tag = "✅ Recent form included" if leg.has_form_data else "⚠️ Odds-only — no recent-form data"
-            st.markdown(
-                f"<div class='pick-card'>"
-                f"<b style='font-size:18px'>{leg.label}</b> — {leg.sport}<br>"
-                f"Odds: {leg.odds:+d} &nbsp;|&nbsp; Lilly's chance: <b>{leg.probability:.0%}</b> &nbsp;|&nbsp; "
-                f"{leg.bookmaker or ''} &nbsp;|&nbsp; {leg.event}<br>"
-                f"{form_tag}"
-                f"</div>",
-                unsafe_allow_html=True,
-            )
-            if st.button("❌ Remove", key=f"slip-remove-{active_profile}-{leg.key}"):
-                SLIP_BOOK.remove(active_profile, leg.key)
-                st.rerun()
         # Quick amounts first (they set the stake the number
         # input below then shows), then the adjustable amount.
         st.markdown("**Bet amount** — tap a quick amount or type your own:")
@@ -898,25 +1166,16 @@ elif page == "🎟️ My Slip":
             key=stake_key,
         )
         summary = slip.slip_summary(my_legs, float(stake))
-        sm1, sm2, sm3, sm4 = st.columns(4)
-        sm1.metric(
-            "Combined odds",
-            f"{summary['american_odds']:+d}",
-            help=f"Decimal {summary['decimal_odds']:.2f} — what $1 returns if every leg wins.",
-        )
-        sm2.metric(
-            "True overall chance",
-            f"{summary['overall_probability']:.1%}",
-            help="Lilly's estimate: her chance for each leg, multiplied together.",
-        )
-        sm3.metric("If it hits, you get back", f"${summary['payout']:.2f}")
-        sm4.metric("Profit", f"${summary['profit']:.2f}")
-        st.write(
-            f"Lilly's estimate for the whole slip: **{summary['overall_probability']:.1%}** "
-            f"(about 1 in {summary['one_in']:.0f}) &nbsp;|&nbsp; "
-            f"Expected value at this amount: **${summary['expected_value']:+.2f}** "
-            "(her chance × the payout − your stake)."
-        )
+        # The slip itself, printed as a bet ticket — every
+        # number the old metrics showed is in its footer.
+        _render_slip_ticket(my_legs, summary, active_profile)
+        for leg in my_legs:
+            if st.button(
+                f"❌ Remove — {leg.label}",
+                key=f"slip-remove-{active_profile}-{leg.key}",
+            ):
+                SLIP_BOOK.remove(active_profile, leg.key)
+                st.rerun()
         save_col, clear_col = st.columns(2)
         if clear_col.button("🧹 Clear slip", key="slip-clear"):
             SLIP_BOOK.clear(active_profile)
@@ -924,8 +1183,9 @@ elif page == "🎟️ My Slip":
         if save_col.button("💾 Save slip to my record", key="slip-save"):
             added, already = PICK_LOG.record_manual(
                 my_legs,
-                mode=st.session_state["mode"],
+                mode="live",
                 profile=active_profile,
+                created_at=now_stamp(),
             )
             SLIP_BOOK.clear(active_profile)
             note = (
@@ -933,8 +1193,6 @@ elif page == "🎟️ My Slip":
                 + (f" — {len(already)} leg(s) were already on it (Lilly logged them too)." if already else ".")
                 + " Settle them Won / Lost on Results / Ledger after the games."
             )
-            if st.session_state["mode"] == "demo":
-                note += " These were DEMO picks — sample record only."
             st.session_state["slip_flash"] = note
             st.rerun()
 
@@ -1205,11 +1463,6 @@ elif page == "Results / Ledger":
             f"Your played picks hit rate: {played['hit_rate']:.0%} "
             f"({played['settled']} played picks settled)."
         )
-    if pstats["demo"]["total"]:
-        st.caption(
-            f"Demo picks are kept out of the record above: {pstats['demo']['total']} demo "
-            f"picks logged, {pstats['demo']['settled']} settled. Demo never counts as a real record."
-        )
     if pstats["manual"]["total"]:
         st.caption(
             f"Picks built by hand on My Slip are tagged ✋ Your pick and kept out of "
@@ -1227,15 +1480,15 @@ elif page == "Results / Ledger":
         group = [e for e in open_entries if e.date == group_date]
         with st.expander(f"{group_date} — {len(group)} open picks", expanded=(group_date == open_dates[0])):
             for entry in group:
-                demo_tag = " · DEMO" if entry.mode == "demo" else ""
                 manual_tag = " · ✋ Your pick" if getattr(entry, "source", "lilly") == "manual" else ""
                 king_tag = " · 👑 King's style" if getattr(entry, "style", "standard") == "king" else ""
                 i_played = active_profile in entry.played_by
                 st.markdown(
                     f"<div class='pick-card'>"
-                    f"<b style='font-size:17px'>{entry.label}</b> — {entry.sport}{demo_tag}{manual_tag}{king_tag} · {entry.model}<br>"
+                    f"<b style='font-size:17px'>{entry.label}</b> — {entry.sport}{manual_tag}{king_tag} · {entry.model}<br>"
                     f"{entry.event} &nbsp;|&nbsp; Odds: {entry.odds:+d} &nbsp;|&nbsp; "
-                    f"Chance: <b>{entry.probability:.0%}</b>"
+                    f"Chance: <b>{entry.probability:.0%}</b> &nbsp;|&nbsp; "
+                    f"Pulled {entry_stamp(entry)}"
                     f"</div>",
                     unsafe_allow_html=True,
                 )
@@ -1256,7 +1509,6 @@ elif page == "Results / Ledger":
         with st.expander(f"Settled picks — {len(settled_entries)} done"):
             for entry in settled_entries[:30]:
                 mark = "✅ Won" if entry.status == "won" else "❌ Lost"
-                demo_tag = " · DEMO" if entry.mode == "demo" else ""
                 manual_tag = " · ✋ Your pick" if getattr(entry, "source", "lilly") == "manual" else ""
                 king_tag = " · 👑 King's style" if getattr(entry, "style", "standard") == "king" else ""
                 played_note = (
@@ -1264,7 +1516,7 @@ elif page == "Results / Ledger":
                 )
                 learned_note = f" · 📚 learned: {entry.learning}" if entry.learning else ""
                 st.write(
-                    f"{mark} — **{entry.label}** — {entry.event} · {entry.date}{demo_tag}{manual_tag}{king_tag} · {entry.model}{played_note}{learned_note}"
+                    f"{mark} — **{entry.label}** — {entry.event} · {entry.date}{manual_tag}{king_tag} · {entry.model}{played_note}{learned_note} · pulled {entry_stamp(entry)}"
                 )
             if len(settled_entries) > 30:
                 st.caption(f"Showing the newest 30 of {len(settled_entries)} settled picks.")
@@ -1273,7 +1525,7 @@ elif page == "Results / Ledger":
     st.markdown("---")
     st.subheader("🧠 What Lilly has learned")
     st.write(
-        "Lilly studies her own settled record — real picks only, never demo — "
+        "Lilly studies her own settled record — her live picks only — "
         "and recalibrates where her stated chances have been running hot or "
         "cold. A bucket needs **30 settled picks** before any correction "
         "switches on, corrections are shrunk by sample size and capped at "
@@ -1288,7 +1540,7 @@ elif page == "Results / Ledger":
         st.write(
             "📭 **Nothing learned yet — no live picks have settled.** "
             "Settle real picks above after the games and she starts learning "
-            "from them. Demo picks never teach her anything."
+            "from them."
         )
     else:
         if active:
@@ -1415,20 +1667,17 @@ elif page == "Setup":
     if client.has_key:
         st.success("✅ Live key is set (LILLY_ODDS_API_KEY). Lilly will fetch live props.")
     else:
-        st.markdown(
-            "<div class='demo-banner'>⚠️ NO KEY SET — APP IS IN DEMO MODE WITH SAMPLE DATA</div>",
-            unsafe_allow_html=True,
-        )
+        st.info(f"🔑 No key set yet. {SETUP_NOTE}")
     st.subheader("How to get the free key — 5 steps")
     st.markdown(
         """
         1. Go to **https://the-odds-api.com** in your browser.
         2. Tap **Sign Up** and make a free account (email + password). No card needed.
         3. Open your dashboard — your API key is shown there. Copy it.
-        4. On this PC, open the file `.streamlit/secrets.toml` in this folder and paste:
+        4. In this app's **Streamlit Cloud** page, open **Settings → Secrets** and add:
            `LILLY_ODDS_API_KEY = "paste-your-key-here"`
-           (Or set it as a Windows environment variable with the same name.)
-        5. Restart the app. The banner on the Dashboard will turn green and say LIVE PROPS.
+           (on the same screen as your `KING_PIN` / `KOHEN_PIN` lines).
+        5. Reboot the app. The banner on the Dashboard will turn green and say LIVE PROPS.
         """
     )
     st.subheader("What the free key gives you")

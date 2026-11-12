@@ -33,10 +33,9 @@ app. One slate generation can therefore spend at most one
 request per distinct (event, market) pair across all its
 parlays' legs (44 legs at most, so 44 in the pathological
 case; real slates share legs heavily and land far lower),
-and repeats within the 6-hour cache are free. DEMO runs
-never call this module at all — the app shows one explainer
-line instead, because dropped lines need live prices and
-Lilly does not invent them.
+and repeats within the 6-hour cache are free. Only live
+runs call this module at all, because dropped lines need
+live prices and Lilly does not invent them.
 
 PICK ANNOTATIONS: a dropped King leg is the fresh ScoredProp
 from the board's scoring path, annotated with two plain

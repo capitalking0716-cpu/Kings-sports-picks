@@ -17,9 +17,14 @@ profiles. The per-profile part is `played_by` — the profiles who
 marked "I played this" on a pick — so each profile also gets its
 own played record.
 
-Honesty rules, same as the ledger: demo picks are logged with
-mode="demo" and are NEVER mixed into the headline hit-rate
-stats. Demo numbers are reported separately, or not at all.
+Honesty rules, same as the ledger: every pick here is a LIVE
+pick. Demo mode was removed from the app entirely on
+2026-11-12 (Neko: "the app is live, it's only for me and my
+kid, we don't need the reminder") — sample picks are never
+generated any more, and any demo entries saved by the old
+build are purged from this log on load (see PickLog._load):
+they were labelled sample data, not real picks, and they do
+not belong in the record. Live entries are untouched.
 
 Every entry also carries a `model` tag — the scoring era that
 produced the pick ("v2" = the projection-model blend, wired
@@ -57,8 +62,15 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
+
+try:
+    from zoneinfo import ZoneInfo
+
+    _DETROIT = ZoneInfo("America/Detroit")
+except Exception:  # no tz database on this machine — fail soft
+    _DETROIT = None
 
 from . import profiles as _profiles
 from .model import SCORING_VERSION
@@ -77,6 +89,33 @@ def pick_key(created: str, event: str, player: str, market: str, line) -> str:
     double-logging.
     """
     return f"{created}|{event}|{player}|{market}|{float(line):g}"
+
+
+def now_stamp() -> str:
+    """The current instant as an ISO timestamp with offset —
+    the stamp a new pick is created with."""
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def entry_stamp(entry) -> str:
+    """When a pick was pulled, for display: date AND time in
+    America/Detroit ("Nov 12, 2026 · 04:37 PM ET") from the
+    entry's created_at stamp. Entries saved before stamps
+    existed carry no created_at and fall back to their date
+    alone ("Nov 12, 2026") — never an invented time."""
+    stamp = getattr(entry, "created_at", "") or ""
+    if stamp:
+        try:
+            moment = datetime.fromisoformat(stamp)
+            if moment.tzinfo is not None and _DETROIT is not None:
+                moment = moment.astimezone(_DETROIT)
+            return moment.strftime("%b %d, %Y · %I:%M %p ET")
+        except ValueError:
+            pass
+    try:
+        return date.fromisoformat(entry.date).strftime("%b %d, %Y")
+    except (ValueError, AttributeError):
+        return str(getattr(entry, "date", ""))
 
 
 @dataclass
@@ -121,6 +160,11 @@ class PickEntry:
     # kings_picks/king_style.py). King entries keep source=
     # "lilly" — her picks, his style — and teach her loop.
     style: str = "standard"
+    # When this pick was pulled, as an ISO timestamp with
+    # offset — every pick in one pull shares the pull's
+    # instant. Entries saved before stamps existed load with
+    # "" and display by date alone (see entry_stamp).
+    created_at: str = ""
 
 
 class PickLog:
@@ -128,15 +172,28 @@ class PickLog:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.entries: list[PickEntry] = self._load()
+        if self._purged_demo:
+            # The demo purge is a migration, not a view: write
+            # the cleaned log back so the demo entries are
+            # gone from disk for good.
+            self._save()
 
     def _load(self) -> list[PickEntry]:
+        self._purged_demo = False
         if not self.path.exists():
             return []
         try:
             raw = json.loads(self.path.read_text())
-            return [PickEntry(**item) for item in raw]
+            entries = [PickEntry(**item) for item in raw]
         except Exception:
             return []
+        # Demo mode was removed from the app on 2026-11-12.
+        # Entries the old build saved with mode="demo" were
+        # labelled sample data, never real picks — drop them
+        # permanently. Live entries load exactly as before.
+        kept = [e for e in entries if e.mode != "demo"]
+        self._purged_demo = len(kept) != len(entries)
+        return kept
 
     def _save(self) -> None:
         self.path.write_text(json.dumps([asdict(e) for e in self.entries], indent=2))
@@ -149,6 +206,7 @@ class PickLog:
         mode: str,
         created: str | None = None,
         model: str = SCORING_VERSION,
+        created_at: str | None = None,
     ) -> list[PickEntry]:
         """Log every leg of every parlay as an individual pick.
 
@@ -165,6 +223,7 @@ class PickLog:
         Returns only the entries that were newly added.
         """
         created = created or date.today().isoformat()
+        created_at = created_at or now_stamp()
         known = {e.key for e in self.entries}
         added: list[PickEntry] = []
         for parlay in parlays:
@@ -204,6 +263,7 @@ class PickLog:
                     model=model,
                     learning=getattr(pick, "learning", "") or "",
                     style=style,
+                    created_at=created_at,
                 )
                 self.entries.append(entry)
                 added.append(entry)
@@ -217,6 +277,7 @@ class PickLog:
         mode: str,
         profile: str,
         created: str | None = None,
+        created_at: str | None = None,
     ) -> tuple[list[PickEntry], list[PickEntry]]:
         """Log the legs of a hand-built My Slip slip.
 
@@ -236,6 +297,7 @@ class PickLog:
         Returns (newly_added, already_on_record).
         """
         created = created or date.today().isoformat()
+        created_at = created_at or now_stamp()
         profile = _profiles.normalize_profile(profile)
         added: list[PickEntry] = []
         already: list[PickEntry] = []
@@ -266,6 +328,7 @@ class PickLog:
                 played_by=[profile],
                 model=SCORING_VERSION,
                 source="manual",
+                created_at=created_at,
             )
             self.entries.append(entry)
             added.append(entry)

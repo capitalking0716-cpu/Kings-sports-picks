@@ -83,7 +83,7 @@ def test_record_run_logs_every_leg_of_every_parlay(tmp_path):
 
 def test_record_run_entry_fields(tmp_path):
     log = PickLog(tmp_path / "pick_log.json")
-    log.record_run(built_parlays(plan=((3, 1),)), "demo", created=TODAY)
+    log.record_run(built_parlays(plan=((3, 1),)), "live", created=TODAY)
     entry = log.entries[0]
     assert entry.id == entry.key
     assert entry.date == TODAY
@@ -93,8 +93,9 @@ def test_record_run_entry_fields(tmp_path):
     assert isinstance(entry.line, float)
     assert entry.odds == -110
     assert 0 < entry.probability <= 1
-    assert entry.mode == "demo"
+    assert entry.mode == "live"
     assert entry.status == "open"
+    assert entry.created_at  # every new entry carries its pull stamp
     assert entry.played_by == []
     assert entry.label  # display label carried through
 

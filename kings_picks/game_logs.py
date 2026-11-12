@@ -36,7 +36,7 @@ No feed = odds-only labels, exactly like before this module
 existed. These feeds NEVER touch The Odds API (quota!).
 
 Form is only ever attached to LIVE props matched by name to a
-real feed row. Demo props never get form data.
+real feed row.
 """
 
 from __future__ import annotations
@@ -541,16 +541,13 @@ def make_form_lookup(nfl: GameLogs | None, nba: GameLogs | None):
     display-only now: the Players page and the breakdown's
     Recent form section show it as descriptive stats.
 
-    Demo props NEVER get form. Unmatched players stay
-    odds-only. A matched log shorter than the projection
-    model's minimum (5 games) still comes back here — the
-    projection returns None for it and scoring stays
-    odds-only, with no hit-rate fallback.
+    Unmatched players stay odds-only. A matched log shorter
+    than the projection model's minimum (5 games) still
+    comes back here — the projection returns None for it and
+    scoring stays odds-only, with no hit-rate fallback.
     """
 
     def lookup(prop) -> list | None:
-        if getattr(prop, "source", "live") == "demo":
-            return None
         logs = nfl if prop.sport == "NFL" else nba if prop.sport == "NBA" else None
         if logs is None:
             return None

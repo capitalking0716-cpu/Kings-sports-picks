@@ -308,7 +308,7 @@ def test_app_players_page_renders_stats_without_run_or_key():
     _goto_players(at)
 
     assert at.session_state["parlays"] == []  # algorithm never ran
-    assert at.session_state["mode"] == "demo"  # no key — still works
+    assert at.session_state["mode"] == "no_key"  # no key, nothing pulled — still works
 
     text = _all_text(at)
     assert "Player stats: nflverse" in text

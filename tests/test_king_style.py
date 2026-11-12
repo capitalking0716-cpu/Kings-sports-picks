@@ -426,7 +426,7 @@ def test_learning_correction_rides_onto_king_legs_and_the_log(tmp_path):
     assert entry.learning == "nba_points_over:-3"
 
 
-# ---------- demo: nothing built, one explainer (AppTest) ----------
+# ---------- no key: no picks at all, King included (AppTest) ----------
 
 
 def _run_app(secrets=None):
@@ -452,20 +452,20 @@ def _login_as_king(at):
     return at
 
 
-def test_app_demo_builds_no_king_parlays_and_explains_why():
+def test_app_without_key_builds_nothing_and_says_why():
+    # Demo mode was removed 2026-11-12: with no Odds API key
+    # the app builds NOTHING — no standard parlays, no King
+    # parlays, no sample picks — and shows the plain setup
+    # note instead.
     at = _login_as_king(_run_app(FAKE_SECRETS))
     run = [b for b in at.button if "Run the algorithm" in b.label]
     assert run, "no Run the algorithm button on the Dashboard"
     run[0].click().run()
     assert not at.exception, f"app raised: {at.exception}"
-    # Demo built the standard set but NO King set — the
-    # builder is never invoked without live prices, so no
-    # alternate fetch can fire (the client has no key in
-    # demo anyway) and nothing is invented.
-    assert at.session_state["parlays"], "demo should still build standard parlays"
+    assert at.session_state["parlays"] == []
     assert at.session_state["king_parlays"] == []
-    subheaders = "\n".join(s.value for s in at.subheader)
-    assert "King's style — dropped lines" in subheaders
-    assert "Lilly's standard lines" in subheaders
     infos = "\n".join(i.value for i in at.info)
-    assert "won't invent dropped parlays" in infos
+    assert (
+        "Add your Odds API key in Streamlit Secrets to pull live props."
+        in infos
+    )

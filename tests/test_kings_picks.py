@@ -8,7 +8,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from kings_picks import demo_data, lilly
+from kings_picks import lilly
 from kings_picks.ledger import Ledger
 from kings_picks.model import (
     Prop,
@@ -215,7 +215,7 @@ def test_lilly_chat_offline_no_key_needed():
 def test_ledger_records_and_settles(tmp_path):
     ledger = Ledger(tmp_path / "ledger.json")
     parlays, _ = build_parlays(make_scored(12), plan=[(3, 1)])
-    ids = ledger.record_run(parlays, "demo")
+    ids = ledger.record_run(parlays, "live")
     assert len(ids) == 1
     assert ledger.stats()["total_parlays"] == 1
     assert ledger.stats()["pick_hit_rate"] is None  # nothing settled yet
@@ -247,29 +247,23 @@ def test_ledger_persists_across_reload(tmp_path):
     path = tmp_path / "ledger.json"
     ledger = Ledger(path)
     parlays, _ = build_parlays(make_scored(12), plan=[(3, 1)])
-    ledger.record_run(parlays, "demo")
+    ledger.record_run(parlays, "live")
     ledger2 = Ledger(path)
     assert ledger2.stats()["total_parlays"] == 1
 
 
-# ---------- demo data ----------
+# ---------- full plan builds live ----------
 
-def test_demo_data_is_labelled_demo():
-    props = demo_data.demo_props()
-    assert len(props) >= 20
-    assert all(p.source == "demo" for p in props)
-    assert any(p.sport == "NBA" for p in props)
-    assert any(p.sport == "NFL" for p in props)
-
-
-def test_demo_parlays_build_and_stay_demo(tmp_path):
-    from kings_picks.model import score_prop as sp
-    scored = [sp(p, pair_odds=-110) for p in demo_data.demo_props()]
+def test_full_plan_builds_and_records_live(tmp_path):
+    # The full 8-parlay plan from a live-scored board, and
+    # the ledger records the run as live. (Demo mode was
+    # removed 2026-11-12 — the app only ever builds live.)
+    scored = make_scored(30)
     parlays, _ = build_parlays(scored)
     assert len(parlays) == 8
     ledger = Ledger(tmp_path / "ledger.json")
-    ledger.record_run(parlays, "demo")
-    assert ledger.parlays[0].mode == "demo"
+    ledger.record_run(parlays, "live")
+    assert ledger.parlays[0].mode == "live"
 
 
 # ---------- odds api parsing ----------

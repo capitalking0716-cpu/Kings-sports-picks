@@ -525,8 +525,55 @@ def _login_as_king(at):
     return at
 
 
-def test_app_drop_expander_renders_honestly_in_demo():
+def _install_fake_client(monkeypatch):
+    """A fake live OddsApiClient — a fixture board whose
+    alternate markets come back empty (no book offers a
+    dropped line), so the expander must say so honestly."""
+    from kings_picks.model import Prop
+    from kings_picks.odds_api import AltResult, ApiResult, OddsApiClient
+
+    props = []
+    for i in range(14):
+        for side in ("Over", "Under"):
+            props.append(Prop(
+                player=f"Fixture{i}", sport="NBA", prop="Points",
+                side=side, line=10.5 + i, odds=-110 - (i % 5) * 10,
+                bookmaker="FixtureBook", event=f"Team{i} vs Team{i + 1}",
+                event_id="evt-fixture", source="live",
+            ))
+
+    def fetch_props(self, sport, force_refresh=False, max_events=12):
+        return ApiResult(
+            True, "fixture props",
+            props=[p for p in props if p.sport == sport],
+            requests_remaining="499 of 500 requests left this month (1 used)",
+        )
+
+    monkeypatch.setattr(OddsApiClient, "has_key", property(lambda self: True))
+    monkeypatch.setattr(OddsApiClient, "fetch_props", fetch_props)
+    monkeypatch.setattr(
+        OddsApiClient, "fetch_alternates",
+        lambda self, sport, event_id, market_key, force_refresh=False:
+            AltResult(True, "fixture alternates", prices=[]),
+    )
+    monkeypatch.setattr(
+        OddsApiClient, "resolve_event_id",
+        lambda self, sport, event_label, commence_time="": "evt-fixture",
+    )
+
+
+class _FakeStore:
+    def nfl_logs(self):
+        return None
+
+    def nba_logs(self):
+        return None
+
+
+def test_app_drop_expander_renders_honestly_on_a_live_board(monkeypatch):
     at = _login_as_king(_run_app(FAKE_SECRETS))
+    _install_fake_client(monkeypatch)
+    at.session_state["stats_store"] = _FakeStore()
     radios = list(at.radio)
     radios[0].set_value("🎟️ My Slip").run()
     assert not at.exception, f"app raised: {at.exception}"
@@ -534,14 +581,14 @@ def test_app_drop_expander_renders_honestly_in_demo():
     load[0].click().run()
     assert not at.exception, f"app raised: {at.exception}"
     toggles = [b for b in at.button if "Dropped lines" in b.label]
-    assert toggles, "no dropped-lines expander on the demo board"
+    assert toggles, "no dropped-lines expander on the board"
     toggles[0].click().run()
     assert not at.exception, f"app raised: {at.exception}"
     infos = "\n".join(i.value for i in at.info)
     captions = "\n".join(c.value for c in at.caption)
     markdown = "\n".join(m.value for m in at.markdown)
-    # Demo has no live alternate markets: the page says so,
-    # shows the honest drop note, and invents no price.
-    assert "alternate" in infos
+    # No book offers this player a dropped line: the page
+    # says so, shows the honest drop note, and invents no price.
+    assert "No book offers a dropped line" in infos
     assert "payout drops too" in captions
     assert "No book offers this line" in markdown
