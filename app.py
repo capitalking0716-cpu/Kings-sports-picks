@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 
 import streamlit as st
 
-from kings_picks import breakdown, demo_data, game_logs, lilly, players, profiles, projection
+from kings_picks import breakdown, demo_data, game_logs, learning, lilly, players, profiles, projection
 from kings_picks.ledger import Ledger
 from kings_picks.model import SCORING_VERSION, score_prop
 from kings_picks.odds_api import OddsApiClient
@@ -221,6 +221,9 @@ if active_profile is None:
 DATA_DIR = "data"
 LEDGER = Ledger(f"{DATA_DIR}/ledger.json")
 PICK_LOG = PickLog(f"{DATA_DIR}/pick_log.json")
+LEARNING = learning.LearningEngine(
+    f"{DATA_DIR}/learned.json", f"{DATA_DIR}/lilly-lessons.jsonl"
+)
 
 
 def get_client() -> OddsApiClient:
@@ -296,7 +299,24 @@ def _form_lookup_for(mode: str):
     return game_logs.make_form_lookup(nfl, nba)
 
 
-def score_all(props, form_lookup=None):
+def _learning_lookup_for(mode: str):
+    """Lilly's learned corrections for one run, or None.
+
+    Only LIVE runs learn or get corrected: the corrections are
+    derived from settled live picks, and demo picks (sample
+    data, invented probabilities) must never be blended with
+    her real record in either direction. Refreshing first
+    folds in every pick settled since the last run — this
+    reads the on-disk pick log only; the Odds API is never
+    touched by learning.
+    """
+    if mode != "live":
+        return None
+    LEARNING.refresh(PICK_LOG)
+    return LEARNING.lookup
+
+
+def score_all(props, form_lookup=None, learning_lookup=None):
     """Score props. Opposite-side odds are paired where both sides exist,
     so the bookmaker's cut is taken out. Where a real game-log feed
     matched the player, the projection model (kings_picks/projection.py)
@@ -310,6 +330,11 @@ def score_all(props, form_lookup=None):
     calibration proof (validation/projection-calibration-
     2026-11-12.md) showed that ingredient was worse than always
     saying 50% in the NBA, so it was retired, not kept as a spare.
+
+    On live runs, Lilly's learning loop (kings_picks/learning.py)
+    then applies any calibration correction her settled record
+    has earned for the pick's bucket — after the blend, in the
+    open, tagged on the pick.
     """
     by_line: dict = {}
     for p in props:
@@ -319,6 +344,20 @@ def score_all(props, form_lookup=None):
         pair = by_line.get((p.player, p.sport, p.prop, p.line), {})
         other_side = "Under" if p.side == "Over" else "Over"
         values = form_lookup(p) if form_lookup is not None else None
+        learned = (
+            learning_lookup(p.sport, p.prop, p.side)
+            if learning_lookup is not None
+            else None
+        )
+        learn_kwargs = (
+            {
+                "learning_delta": learned["delta"],
+                "learning_tag": learned["tag"],
+                "learning_note": learned["note"],
+            }
+            if learned
+            else {}
+        )
         form_probability = None
         proj = None
         if values:
@@ -330,10 +369,11 @@ def score_all(props, form_lookup=None):
                 score_prop(p, pair_odds=pair.get(other_side),
                            form_probability=form_probability,
                            projected_value=proj.expected,
-                           projection_games=proj.games)
+                           projection_games=proj.games,
+                           **learn_kwargs)
             )
         else:
-            scored.append(score_prop(p, pair_odds=pair.get(other_side)))
+            scored.append(score_prop(p, pair_odds=pair.get(other_side), **learn_kwargs))
     # Keep only Over picks + the best of each line to avoid mirror duplicates
     # in the pool: for each player/prop/line keep the higher-chance side.
     best: dict = {}
@@ -409,7 +449,9 @@ if "raw_props" not in st.session_state:
 def run_algorithm(force_refresh: bool = False):
     props, mode, note = load_props(force_refresh=force_refresh)
     form_lookup = _form_lookup_for(mode)
-    scored = score_all(props, form_lookup=form_lookup)
+    scored = score_all(
+        props, form_lookup=form_lookup, learning_lookup=_learning_lookup_for(mode)
+    )
     st.session_state["raw_props"] = props
     parlays, build_notes = build_parlays(scored)
     st.session_state["parlays"] = parlays
@@ -850,11 +892,83 @@ elif page == "Results / Ledger":
                 played_note = (
                     f" · played by {', '.join(entry.played_by)}" if entry.played_by else ""
                 )
+                learned_note = f" · 📚 learned: {entry.learning}" if entry.learning else ""
                 st.write(
-                    f"{mark} — **{entry.label}** — {entry.event} · {entry.date}{demo_tag} · {entry.model}{played_note}"
+                    f"{mark} — **{entry.label}** — {entry.event} · {entry.date}{demo_tag} · {entry.model}{played_note}{learned_note}"
                 )
             if len(settled_entries) > 30:
                 st.caption(f"Showing the newest 30 of {len(settled_entries)} settled picks.")
+
+    # ---------- What Lilly has learned ----------
+    st.markdown("---")
+    st.subheader("🧠 What Lilly has learned")
+    st.write(
+        "Lilly studies her own settled record — real picks only, never demo — "
+        "and recalibrates where her stated chances have been running hot or "
+        "cold. A bucket needs **30 settled picks** before any correction "
+        "switches on, corrections are shrunk by sample size and capped at "
+        "10 points, and every corrected pick is tagged in the log. This is "
+        "recalibration, not a promise: she still never guarantees a pick."
+    )
+    learn_state = LEARNING.refresh(PICK_LOG)
+    learn_buckets = learn_state.get("buckets", {})
+    active = learn_state.get("active_corrections", {})
+    settled_live = learn_state.get("settled_live", 0)
+    if not settled_live:
+        st.write(
+            "📭 **Nothing learned yet — no live picks have settled.** "
+            "Settle real picks above after the games and she starts learning "
+            "from them. Demo picks never teach her anything."
+        )
+    else:
+        if active:
+            st.write(f"**{len(active)} correction(s) switched on right now:**")
+            for key in sorted(active):
+                delta = active[key]
+                arrow = "trims" if delta < 0 else "bumps up"
+                st.write(
+                    f"- **{learn_buckets[key]['label']}** — Lilly {arrow} these "
+                    f"by about {abs(delta) * 100:.0f} points "
+                    f"({learn_buckets[key]['settled']} settled picks)."
+                )
+        else:
+            closest = max(
+                learn_buckets.values(), key=lambda b: b["settled"], default=None
+            )
+            if closest is not None:
+                st.write(
+                    "📭 **No corrections switched on yet** — not enough settled "
+                    f"picks in any one bucket. Her fullest bucket is "
+                    f"**{closest['label']}** with {closest['settled']} of "
+                    f"{learning.MIN_SETTLED} settled picks needed — "
+                    f"{closest['needed']} more to go there."
+                )
+        brier = learn_state.get("brier", {})
+        if brier.get("as_shown") is not None:
+            st.caption(
+                f"Her settled-pick Brier score: **{brier['as_shown']:.3f}** "
+                f"as shown vs {brier['uncorrected']:.3f} without learning "
+                "(lower is better — always saying 50% scores 0.250). "
+                "That gap is how the learning itself gets graded."
+            )
+        with st.expander(f"Bucket by bucket — {len(learn_buckets)} buckets tracked"):
+            for key in sorted(learn_buckets):
+                b = learn_buckets[key]
+                corr = (
+                    f"{b['correction'] * 100:+.0f} points"
+                    if b["active"]
+                    else f"off — needs {b['needed']} more settled"
+                )
+                st.write(
+                    f"**{b['label']}** — {b['settled']} settled · she said "
+                    f"{b['mean_stated']:.0%} on average · won "
+                    f"{(b['hit_rate'] or 0):.0%} · correction: {corr}"
+                )
+    lilly_lessons = LEARNING.lessons()
+    if lilly_lessons:
+        st.markdown("#### 📖 Lilly's lessons")
+        for lesson in reversed(lilly_lessons[-10:]):
+            st.write(f"- {lesson['text']} *({lesson['date']})*")
 
     # ---------- Backup export ----------
     st.markdown("---")
@@ -911,6 +1025,17 @@ elif page == "Results / Ledger":
         "⬇️ Parlay ledger — CSV", data=ledger_csv,
         file_name=f"parlay-ledger-{today_str}.csv", mime="text/csv",
         key="dl-ledger-csv",
+    )
+    dl5, dl6 = st.columns(2)
+    dl5.download_button(
+        "⬇️ What Lilly has learned — JSON", data=LEARNING.state_json(),
+        file_name=f"lilly-learned-{today_str}.json", mime="application/json",
+        key="dl-learned-json",
+    )
+    dl6.download_button(
+        "⬇️ Lilly's lessons — JSONL", data=LEARNING.lessons_text(),
+        file_name=f"lilly-lessons-{today_str}.jsonl", mime="application/json",
+        key="dl-lessons-jsonl",
     )
 
 # ================= SETUP =================

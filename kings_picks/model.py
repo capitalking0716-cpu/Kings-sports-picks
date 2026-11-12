@@ -100,6 +100,13 @@ class Prop:
     edge: float = 0.0
     source: str = "live"  # "live" or "demo"
     form_note: str = ""
+    # Filled in when Lilly's learning loop (kings_picks/
+    # learning.py) adjusted this pick: the bucket tag that
+    # rides into the pick log, e.g. "nba_points_over:-7",
+    # and the signed probability move behind it. Empty / 0
+    # means no learned correction touched this pick.
+    learning: str = ""
+    learning_delta: float = 0.0
 
     @property
     def key(self) -> str:
@@ -171,6 +178,9 @@ def score_prop(
     form_probability: float | None = None,
     projected_value: float | None = None,
     projection_games: int = 0,
+    learning_delta: float = 0.0,
+    learning_tag: str = "",
+    learning_note: str = "",
 ) -> ScoredProp:
     """Score one prop and explain it in plain words.
 
@@ -189,6 +199,13 @@ def score_prop(
     the raw "share of recent games over the line" was retired as
     an ingredient by the calibration proof and must not come
     back through this function.
+
+    learning_delta / learning_tag / learning_note: Lilly's
+    self-learning correction (kings_picks/learning.py), derived
+    ONLY from her settled live record. Applied after the blend,
+    explained in the why-text, tagged onto the pick. The caller
+    (the app's live scoring path) passes it only for live
+    picks — demo picks are never adjusted.
     """
     if pair_odds is not None:
         if prop.side == "Over":
@@ -237,6 +254,21 @@ def score_prop(
             "not pretend to know more than the odds say. "
             "Odds-only, no recent-form data."
         )
+
+    # Lilly's learning loop (kings_picks/learning.py) applies
+    # LAST, on top of the blend above: a small calibration
+    # correction earned by her own settled record in this
+    # pick's bucket. It is capped and shrunk by the learning
+    # module, the move is explained in her why-text, and the
+    # tag rides into the pick log so the correction itself
+    # stays on the record. No correction -> nothing changes.
+    if learning_delta:
+        scored.probability = min(max(scored.probability + learning_delta, 0.05), 0.95)
+        scored.edge = scored.probability - implied
+        scored.learning = learning_tag
+        scored.learning_delta = learning_delta
+        if learning_note:
+            scored.why += f" {learning_note}"
     return scored
 
 

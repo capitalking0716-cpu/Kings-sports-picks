@@ -79,6 +79,12 @@ class PickEntry:
     # before this field existed load with the "v1" default —
     # everything scored before the v2 wiring IS v1.
     model: str = "v1"
+    # Lilly's learning tag, when her self-learning correction
+    # (kings_picks/learning.py) moved this pick's number:
+    # "bucket:points", e.g. "nba_points_over:-7". Empty means
+    # no learned correction touched the pick. Entries saved
+    # before the learning loop existed load with "".
+    learning: str = ""
 
 
 class PickLog:
@@ -146,6 +152,7 @@ class PickLog:
                     mode=mode,
                     label=pick.label,
                     model=model,
+                    learning=getattr(pick, "learning", "") or "",
                 )
                 self.entries.append(entry)
                 added.append(entry)

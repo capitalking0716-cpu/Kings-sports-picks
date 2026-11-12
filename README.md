@@ -122,6 +122,30 @@ may only restate her verdict in her voice — never change it.
   size, per pick, and overall. Saved locally in `data/ledger.json`.
 - **Setup** — key status, how to get the free key, and the membership plan note.
 
+## Lilly learns (self-learning loop)
+
+Lilly recalibrates from her own settled record (`kings_picks/learning.py`):
+
+- She learns **only from settled, live picks** — demo picks and unsettled picks
+  never teach her anything.
+- Per bucket (sport × market × side, e.g. NBA Points overs, with a sport × side
+  fallback), she compares the chance she stated against how often those picks
+  actually won. A bucket needs **30 settled picks** before any correction
+  switches on; the correction is shrunk by sample size (full trust at 100) and
+  capped at **±10 percentage points**.
+- Corrections apply in the live scoring path, after the projection/odds blend.
+  Every corrected pick is explained in its why-text and tagged in the pick log
+  (e.g. `learning: "nba_points_over:-7"`).
+- She writes herself a plain-language **lesson** whenever a correction switches
+  on, off, or moves materially (`data/lilly-lessons.jsonl`), and her **Brier
+  score** is tracked as-shown vs uncorrected, so the learning itself is graded.
+  State lives in `data/learned.json`; both files are in the Results page
+  backup exports. The **🧠 What Lilly has learned** section on the Results
+  page shows buckets, corrections, and lessons — including an honest "not
+  enough settled picks yet" when that is the truth.
+- Learning reads the on-disk pick log only — **zero Odds API calls**.
+  Recalibration is not a promise of profit or accuracy.
+
 ## Membership plan (NOT built yet)
 
 Neko's plan: sell this as a **$25/month membership ONLY after consistent picks are
@@ -145,6 +169,8 @@ kings_picks/
   model.py                Transparent probability model (odds -> chance, vig removed)
   parlays.py              Parlay builder (highest overall chance, no duplicates)
   lilly.py                Lilly — brief, verdicts, offline chat
+  learning.py             Self-learning loop (calibration from settled live picks)
+  pick_log.py             Every pick logged and tracked won/lost, played or not
   ledger.py               Results ledger (local JSON, per-profile records)
   profiles.py             King & Kohen PIN login (PINs live only in Streamlit secrets)
   demo_data.py            Clearly-labelled sample data for demo/offline mode

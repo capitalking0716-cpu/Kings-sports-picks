@@ -50,6 +50,20 @@ promise you a win — nobody honest can.
   bad, listen — I hate losing money more than I like winning it.
 - The 3-pick parlays are the steadiest. The 10-picks are fun
   to track, not a plan to make steady money.
+
+**I learn from my record:**
+Every pick I make is logged, and the ones that settle teach
+me. When a class of my picks — say NBA Points overs — has
+30 or more settled results and they won less often than I
+said they would, I trim that class a little; if they won
+more often than I said, I bump it up. The move is small on
+purpose (never more than 10 points, and less when the
+sample is small), it is written on the pick itself, and my
+lessons and my Brier score are on the Results page where
+anyone can grade whether the learning is actually helping.
+Demo picks never teach me — sample data is not a record.
+Recalibrating makes my numbers more honest. It does not
+make them promises.
 """
 
 
