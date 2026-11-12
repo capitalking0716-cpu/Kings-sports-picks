@@ -15,7 +15,7 @@ import streamlit as st
 from kings_picks import breakdown, demo_data, game_logs, learning, lilly, players, profiles, projection, slip
 from kings_picks.ledger import Ledger
 from kings_picks.model import SCORING_VERSION, score_prop
-from kings_picks.odds_api import OddsApiClient
+from kings_picks.odds_api import OddsApiClient, market_key_for_label
 from kings_picks.parlays import build_parlays
 from kings_picks.pick_log import PickLog
 
@@ -383,6 +383,118 @@ def score_all(props, form_lookup=None, learning_lookup=None):
         if k not in best or s.probability > best[k].probability:
             best[k] = s
     return sorted(best.values(), key=lambda x: x.probability, reverse=True)
+
+
+def _render_drop_options(pick, active_profile):
+    """The dropped-lines expander for one My Slip board row.
+
+    Neko's style: play the Over at a lower line — less
+    payout, bigger chance (Unders mirror: a raised line).
+    FETCH DISCIPLINE: alternate markets are fetched ONLY
+    here, only after the user taps THIS pick open, only for
+    this pick's event + market, through the disk-cached
+    client — so an expansion costs 1 request the first time
+    and nothing while the 6-hour cache is warm. Nothing is
+    fetched for picks nobody expands.
+    """
+    open_key = f"slip_drop_open_{active_profile}_{pick.key}"
+    if not st.session_state.get(open_key):
+        if st.button(
+            "📉 Dropped lines — play it safer",
+            key=f"slip-drop-btn-{active_profile}-{pick.key}",
+        ):
+            st.session_state[open_key] = True
+            st.rerun()
+        return
+    if st.button(
+        "📉 Hide dropped lines",
+        key=f"slip-drop-btn-{active_profile}-{pick.key}",
+    ):
+        st.session_state[open_key] = False
+        st.rerun()
+        return
+
+    st.caption(slip.DROP_NOTE)
+    mode = st.session_state["mode"]
+    market_key = market_key_for_label(pick.prop)
+    alt_prices = []
+    if mode != "live" or market_key is None:
+        st.info(
+            "Dropped lines are priced from the books' live alternate "
+            "markets — they show here on live boards, when a book "
+            "offers them."
+        )
+    else:
+        client = get_client()
+        event_id = getattr(pick, "event_id", "") or client.resolve_event_id(
+            pick.sport, pick.event, getattr(pick, "commence_time", "") or ""
+        )
+        result = client.fetch_alternates(pick.sport, event_id or "", market_key)
+        if not result.ok:
+            st.info(result.message)
+        else:
+            note = result.message
+            if result.requests_remaining and not result.from_cache:
+                note += f" | {result.requests_remaining}"
+            st.caption(note)
+            alt_prices = result.prices
+            if not any(p.player == pick.player for p in alt_prices):
+                st.info(
+                    f"No book offers a dropped line for {pick.player} — "
+                    f"{pick.prop} in this game."
+                )
+    form_lookup = _form_lookup_for(mode)
+    values = form_lookup(pick) if form_lookup is not None else None
+    learning_lookup = _learning_lookup_for(mode)
+    learned = (
+        learning_lookup(pick.sport, pick.prop, pick.side)
+        if learning_lookup is not None
+        else None
+    )
+    options = slip.build_drop_options(
+        pick, alt_prices, form_values=values, learning=learned
+    )
+    keys_now = SLIP_BOOK.keys(active_profile)
+    families_now = SLIP_BOOK.families(active_profile)
+    for option in options:
+        if option.playable:
+            leg = option.to_leg()
+            st.markdown(
+                f"<div class='pick-card'>"
+                f"<b style='font-size:18px'>{pick.player} — {pick.prop} {option.label}</b><br>"
+                f"Odds: {option.odds:+d} &nbsp;|&nbsp; Lilly's chance: "
+                f"<b>{option.probability:.0%}</b> (standard {option.base_line:g}: "
+                f"{option.standard_probability:.0%}) &nbsp;|&nbsp; {option.bookmaker}"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+            if leg is not None and leg.key in keys_now:
+                st.caption("✅ On your slip")
+            elif leg is not None and leg.family in families_now:
+                st.caption(
+                    "Another version of this pick is on your slip — "
+                    "remove it from the slip above to switch versions."
+                )
+            elif st.button(
+                "➕ Add dropped line to slip",
+                key=f"slip-drop-add-{active_profile}-{pick.key}-{option.line:g}",
+            ):
+                SLIP_BOOK.add(active_profile, leg)
+                st.rerun()
+        elif option.probability is not None:
+            st.markdown(
+                f"**{pick.player} — {pick.prop} {option.label}** — Lilly's "
+                f"chance: **{option.probability:.0%}** (standard "
+                f"{option.base_line:g}: {option.standard_probability:.0%})"
+                f"<br><i>{option.note}</i>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                f"**{pick.player} — {pick.prop} {option.label}**"
+                f"<br><i>{option.note}</i>",
+                unsafe_allow_html=True,
+            )
 
 
 def render_parlay(parlay, mode: str):
@@ -765,6 +877,7 @@ elif page == "🎟️ My Slip":
             "League", ["All", "NBA", "NFL"], horizontal=True, key="slip_sport"
         )
         on_slip = SLIP_BOOK.keys(active_profile)
+        families_on_slip = SLIP_BOOK.families(active_profile)
         board = [
             p for p in scored
             if (sport_choice == "All" or p.sport == sport_choice)
@@ -787,10 +900,17 @@ elif page == "🎟️ My Slip":
                 if st.button("✅ On your slip — tap to remove", key=f"slip-toggle-{active_profile}-{pick.key}"):
                     SLIP_BOOK.remove(active_profile, pick.key)
                     st.rerun()
+            elif (pick.player, pick.sport, pick.prop, float(pick.line)) in families_on_slip:
+                st.caption(
+                    "📉 A dropped-line version of this pick is on your slip — "
+                    "remove it from the slip above to change versions."
+                )
             else:
                 if st.button("➕ Add to slip", key=f"slip-toggle-{active_profile}-{pick.key}"):
                     SLIP_BOOK.add(active_profile, slip.SlipLeg.from_prop(pick))
                     st.rerun()
+            if slip.drop_steps_for(pick.prop):
+                _render_drop_options(pick, active_profile)
 
 # ================= PLAYERS =================
 elif page == "Players":

@@ -182,6 +182,39 @@ no Odds API calls beyond that fetch:
   In demo mode the builder runs on the labelled sample board and saved
   slips are demo record only.
 
+### Dropped lines — Neko's style
+
+Neko's own way of playing: *"whatever the player is known for, take that
+number and drop it down a few and play that"* — play the Over at a lower
+line: less payout, higher hit chance. Each board row with a droppable
+market carries a **📉 Dropped lines** expander (Unders mirror it with a
+raised line):
+
+- Drop sizes scale with the market (`DROP_STEPS` in `slip.py`): counting
+  stats (Points / Rebounds / Assists) −2 / −4 / −6, yardage −10 / −20 /
+  −30, Passing Yards −25 / −50 / −75, smaller steps for threes,
+  receptions and passing TDs — always in line-preserving steps, always
+  above zero. Anytime Touchdown has no line to drop and gets no expander.
+- Lilly's chance at each dropped line is recomputed through the **same
+  scoring path as the board** — the v2 projection at the new line,
+  blended with the book's real price there, learning corrections
+  included. Nothing is hand-adjusted.
+- The price at a dropped line is a **real book price** from the event's
+  alternate market (standard key + `_alternate`). Alternates are fetched
+  **only when a pick's expander is tapped**, only that event's one
+  alternate market (1 request), and disk-cached for 6 hours like the
+  slate — re-views are free. If no book offers the alternate line, the
+  UI says so plainly; a dropped option with no real price can be shown
+  for its projected chance but **cannot join the slip**, because the
+  slip's payout maths runs on real prices only.
+- A dropped leg is a normal manual leg played at the dropped line: it
+  shows as e.g. `Over 19.5 (dropped from 24.5)`, the standard and any
+  dropped version of one selection share one slip slot, saved slips
+  settle against the **played** line, and manual picks still never
+  teach the learning loop. The drop UI carries Lilly's one-line honesty
+  note: the book charges for the safety, and the slip's EV line is the
+  check on whether a dropped line is worth it.
+
 ## Membership plan (NOT built yet)
 
 Neko's plan: sell this as a **$25/month membership ONLY after consistent picks are

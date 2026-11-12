@@ -75,6 +75,24 @@ MARKET_LABELS = {
 
 CACHE_TTL_SECONDS = 6 * 60 * 60  # 6 hours; refresh on demand
 
+# Prop label -> Odds API market key (the reverse of
+# MARKET_LABELS; labels are unique, so this is lossless).
+LABEL_TO_MARKET = {label: key for key, label in MARKET_LABELS.items()}
+
+
+def market_key_for_label(label: str) -> str | None:
+    """The Odds API market key for a prop label, or None."""
+    return LABEL_TO_MARKET.get(label)
+
+
+def alternate_market_key(market_key: str) -> str:
+    """The alternate-lines market for a standard market key:
+    the standard key + "_alternate" (e.g. player_points ->
+    player_points_alternate). Alternate markets carry the
+    SAME prop at a RANGE of lines — the dropped (safer) and
+    raised lines Neko's betting style plays."""
+    return f"{market_key}_alternate"
+
 
 @dataclass
 class ApiResult:
@@ -87,6 +105,39 @@ class ApiResult:
     def __post_init__(self):
         if self.props is None:
             self.props = []
+
+
+@dataclass
+class AltPrice:
+    """One book's price for one side of one ALTERNATE line.
+
+    Same honesty rules as Prop: this is a real price a real
+    book showed in the API response, never an estimate.
+    """
+
+    player: str
+    sport: str
+    prop: str  # the STANDARD market's label, e.g. "Points"
+    market_key: str  # the standard market key, e.g. "player_points"
+    side: str  # "Over" or "Under"
+    line: float
+    odds: int  # American odds
+    bookmaker: str = ""
+    event: str = ""  # e.g. "Lakers vs Celtics"
+    commence_time: str = ""
+
+
+@dataclass
+class AltResult:
+    ok: bool
+    message: str
+    prices: list = None
+    requests_remaining: str = ""
+    from_cache: bool = False
+
+    def __post_init__(self):
+        if self.prices is None:
+            self.prices = []
 
 
 def get_api_key() -> str:
@@ -188,9 +239,72 @@ def _parse_event_odds(
                 event=event_label,
                 commence_time=commence,
                 source="live",
+                event_id=str(event.get("id", "") or ""),
             )
         )
     return props
+
+
+def _parse_event_alternates(
+    event: dict,
+    sport: str,
+    market_key: str,
+    bookmakers: tuple[str, ...],
+) -> list:
+    """Turn one event's odds JSON into AltPrice rows for ONE
+    alternate market (the standard key + "_alternate").
+
+    Same parsing rules as _parse_event_odds: the player is
+    the outcome's `description`, and we keep the BEST price
+    (highest payout) per (player, side, line) across the
+    bookmakers asked for. Books that don't offer the market
+    simply contribute nothing — no row is ever invented for
+    a line no book priced.
+    """
+    home = event.get("home_team", "")
+    away = event.get("away_team", "")
+    event_label = f"{away} vs {home}" if away and home else ""
+    commence = str(event.get("commence_time", ""))
+    label = MARKET_LABELS.get(market_key, market_key)
+    alt_key = alternate_market_key(market_key)
+
+    # (player, side, line) -> best (odds, bookmaker)
+    best: dict[tuple, tuple[int, str]] = {}
+    for book in event.get("bookmakers", []):
+        if bookmakers and book.get("key") not in bookmakers:
+            continue
+        for market in book.get("markets", []):
+            if market.get("key", "") != alt_key:
+                continue
+            for outcome in market.get("outcomes", []):
+                player = (outcome.get("description") or "").strip()
+                side = (outcome.get("name") or "").strip()
+                point = outcome.get("point")
+                price = outcome.get("price")
+                if not player or side not in ("Over", "Under"):
+                    continue
+                if point is None or price is None:
+                    continue
+                k = (player, side, float(point))
+                odds = int(price)
+                if k not in best or odds > best[k][0]:
+                    best[k] = (odds, book.get("title", book.get("key", "")))
+
+    return [
+        AltPrice(
+            player=player,
+            sport=sport,
+            prop=label,
+            market_key=market_key,
+            side=side,
+            line=line,
+            odds=odds,
+            bookmaker=book,
+            event=event_label,
+            commence_time=commence,
+        )
+        for (player, side, line), (odds, book) in best.items()
+    ]
 
 
 class OddsApiClient:
@@ -308,3 +422,138 @@ class OddsApiClient:
         if errors:
             msg += f" {len(errors)} game(s) had no props: " + "; ".join(errors[:3])
         return ApiResult(True, msg, props=props, requests_remaining=remaining)
+
+    # ---------- alternate lines (dropped / raised), on demand ----------
+
+    def alt_cache_path(self, sport: str, event_id: str, market_key: str) -> Path:
+        """One cache file per (sport, event, market): an
+        expansion fetches exactly one event's one alternate
+        market, and is cached under exactly that key."""
+        return self.cache_dir / f"alt_{sport.lower()}_{event_id}_{market_key}.json"
+
+    def _load_alt_cache(self, path: Path) -> AltResult | None:
+        try:
+            data = json.loads(path.read_text())
+            age = time.time() - data.get("saved_at", 0)
+            if age > CACHE_TTL_SECONDS:
+                return None
+            prices = [AltPrice(**p) for p in data.get("prices", [])]
+            return AltResult(
+                ok=True,
+                message=f"Loaded {len(prices)} alternate prices from cache (saved {int(age // 60)} min ago).",
+                prices=prices,
+                from_cache=True,
+            )
+        except Exception:
+            return None
+
+    def _save_alt_cache(self, path: Path, prices: list) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "saved_at": time.time(),
+            "prices": [p.__dict__ for p in prices],
+        }
+        path.write_text(json.dumps(payload))
+
+    def resolve_event_id(
+        self, sport: str, event_label: str, commence_time: str = ""
+    ) -> str | None:
+        """Find an event's Odds API id from its label
+        ("Away vs Home") via the FREE events endpoint — no
+        quota. For board props loaded from an older cache
+        that predates Prop.event_id. Matches the label, and
+        the commence time too when both sides know it.
+        Returns None when nothing matches — the caller then
+        honestly can't fetch that event's alternates.
+        """
+        if not self.has_key:
+            return None
+        try:
+            resp = self._get(f"/sports/{SPORT_KEYS[sport]}/events", {})
+        except requests.RequestException:
+            return None
+        if resp.status_code != 200:
+            return None
+        for event in resp.json():
+            away = event.get("away_team", "")
+            home = event.get("home_team", "")
+            label = f"{away} vs {home}" if away and home else ""
+            if label != event_label:
+                continue
+            if commence_time and str(event.get("commence_time", "")) != commence_time:
+                continue
+            return str(event.get("id", "") or "") or None
+        return None
+
+    def fetch_alternates(
+        self,
+        sport: str,
+        event_id: str,
+        market_key: str,
+        force_refresh: bool = False,
+    ) -> AltResult:
+        """Alternate lines for ONE market of ONE event — the
+        dropped / raised lines behind the My Slip expander.
+
+        QUOTA: this is called ONLY when the user taps to
+        expand dropped lines for a specific pick. It asks for
+        exactly one alternate market in one region, so one
+        priced call costs 1 market x 1 region = 1 request.
+        The result is disk-cached under the (sport, event,
+        market) key with the same 6-hour TTL as the slate, so
+        re-opening the same expansion is free.
+        """
+        cache = self.alt_cache_path(sport, event_id, market_key)
+        if not force_refresh:
+            hit = self._load_alt_cache(cache)
+            if hit is not None:
+                return hit
+        if not self.has_key:
+            return AltResult(
+                False,
+                "No API key set — dropped lines come from the books' real "
+                "alternate markets, so they need the live key in Setup.",
+            )
+        if not event_id:
+            return AltResult(False, "That game couldn't be matched to the odds feed, so its alternate lines can't be fetched.")
+        try:
+            resp = self._get(
+                f"/sports/{SPORT_KEYS[sport]}/events/{event_id}/odds",
+                {
+                    "regions": "us",
+                    "markets": alternate_market_key(market_key),
+                    "oddsFormat": "american",
+                    "bookmakers": ",".join(self.bookmakers),
+                },
+            )
+        except requests.RequestException as exc:
+            return AltResult(False, f"Could not reach The Odds API: {exc}")
+        remaining = self.quota_from(resp)
+        if resp.status_code == 401:
+            return AltResult(False, "The Odds API said the key is not valid (401). Check the key in Setup.")
+        if resp.status_code == 429:
+            return AltResult(False, "The Odds API rate limit was hit (429). Wait a bit and try again.",
+                             requests_remaining=remaining)
+        if resp.status_code == 422:
+            # The event doesn't offer this alternate market at
+            # all — an honest empty, cached like any result so
+            # re-taps don't re-ask.
+            result = AltResult(
+                True,
+                "No book offers alternate lines for this market in this game.",
+                prices=[],
+                requests_remaining=remaining,
+            )
+            self._save_alt_cache(cache, [])
+            return result
+        if resp.status_code != 200:
+            return AltResult(False, f"The Odds API answered {resp.status_code}: {resp.text[:200]}",
+                             requests_remaining=remaining)
+        prices = _parse_event_alternates(resp.json(), sport, market_key, self.bookmakers)
+        self._save_alt_cache(cache, prices)
+        return AltResult(
+            True,
+            f"Fetched {len(prices)} alternate prices for this game.",
+            prices=prices,
+            requests_remaining=remaining,
+        )

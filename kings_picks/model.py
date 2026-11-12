@@ -103,6 +103,13 @@ class Prop:
     bookmaker: str = ""
     event: str = ""  # e.g. "Lakers vs Celtics"
     commence_time: str = ""
+    # The Odds API's own id for the game, filled in at parse
+    # time. The My Slip dropped-lines feature needs it to ask
+    # for THAT event's alternate markets on demand. Props
+    # loaded from caches saved before this field existed
+    # carry "" — the app then resolves the id from the free
+    # events endpoint instead (odds_api.resolve_event_id).
+    event_id: str = ""
     # Filled in by the model:
     probability: float = 0.0
     has_form_data: bool = False
