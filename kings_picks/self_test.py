@@ -12,11 +12,17 @@ WHAT THIS IS, AND WHAT IT IS NOT:
 - It is a DESCRIPTIVE check of past-game form, the same honest
   counting the Players page shows. It is not a promise about
   tonight, and it is not a probability.
-- It NEVER changes a pick. Her stated chances come from the
-  scoring model (kings_picks/model.py) and her learning loop;
-  this grade is computed after the fact and reported alongside
-  the picks, exactly as Neko asked — she tests herself, she
-  does not quietly re-pick.
+- It NEVER changes a pick's stated chance. Her chances come
+  from the scoring model (kings_picks/model.py) and her
+  learning loop; this grade never flows back into score_prop
+  and never reprices a leg. What the grade DOES steer is
+  selection order: since the test-before-picking build
+  (2026-11-12, Neko's order), a live pull grades every
+  candidate leg BEFORE the parlays are built, and the builder
+  ranks form-backed legs first (STRONG, then LEAN), treating
+  SHAKY legs as a last-resort reserve. Same legs, same
+  chances — the grade decides which legs get picked, never
+  what a picked leg claims.
 - The raw hit-rate was RETIRED as a scoring ingredient by the
   walk-forward calibration proof (validation/projection-
   calibration-2026-11-12.md): as a chance it was worse than

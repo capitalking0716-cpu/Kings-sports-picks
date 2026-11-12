@@ -31,6 +31,15 @@ POSITIONS (browsing only — the scoring path never reads them):
   positions empty and the Players page simply shows one list.
 A position is NEVER guessed from a player's stats.
 
+TEAMS (roster guard only — scoring never reads them):
+- NFL: the same CSV's `recent_team` column, most recent row.
+- NBA: the same PlayerIndex endpoint's TEAM_ABBREVIATION,
+  fetched lazily through StatsStore.nba_teams() — its own
+  daily cache, only ever loaded when a pull's roster guard
+  (kings_picks/roster.py) asks. A team is NEVER guessed
+  either; an unstated team just leaves the guard unable to
+  check that player.
+
 FAIL-SOFT IS THE RULE: every fetch/parse error returns None.
 No feed = odds-only labels, exactly like before this module
 existed. These feeds NEVER touch The Odds API (quota!).
@@ -162,18 +171,29 @@ class GameLogs:
     game values, newest game first. `positions` maps the same
     normalized names to the position label the feed stated for
     the player (empty when the feed didn't provide one) — used
-    only by the Players page, never by scoring."""
+    only by the Players page, never by scoring. `teams` maps
+    the same names to the team abbreviation the feed stated
+    for the player (empty when the feed didn't provide one) —
+    read only by the roster guard (kings_picks/roster.py),
+    which drops legs naming a player who isn't in the listed
+    game."""
 
     sport: str
     by_player: dict = field(default_factory=dict)
     source_label: str = ""
     season_label: str = ""
     positions: dict = field(default_factory=dict)
+    teams: dict = field(default_factory=dict)
 
     def position_of(self, player: str):
         """The player's position as the feed stated it, or None
         when unknown. Never guessed."""
         return self.positions.get(normalize_name(player)) or None
+
+    def team_of(self, player: str):
+        """The player's team abbreviation as the feed stated
+        it, or None when unknown. Never guessed."""
+        return self.teams.get(normalize_name(player)) or None
 
     def values(self, player: str, prop_label: str):
         """The player's game values for this prop, newest first,
@@ -255,6 +275,36 @@ def parse_nflverse_positions(text: str) -> dict:
     return {key: position for key, (_week, position) in latest.items()}
 
 
+def parse_nflverse_teams(text: str) -> dict:
+    """nflverse weekly CSV text -> {normalized name: team
+    abbreviation}.
+
+    The team is the feed's own `recent_team` (falling back to
+    `team`) from the player's MOST RECENT regular-season row
+    that states one — a blank cell never erases a team the
+    feed did state. Nothing is inferred from stats: a player
+    whose rows never name a team simply isn't in the result.
+    """
+    reader = csv.DictReader(io.StringIO(text))
+    latest: dict[str, tuple[int, str]] = {}
+    for row in reader:
+        season_type = (row.get("season_type") or "REG").strip()
+        if season_type != "REG":
+            continue
+        name = (row.get("player_display_name") or "").strip()
+        team = (row.get("recent_team") or row.get("team") or "").strip()
+        if not name or not team:
+            continue
+        try:
+            week = int(float(row.get("week") or 0))
+        except (TypeError, ValueError):
+            week = 0
+        key = normalize_name(name)
+        if key not in latest or week >= latest[key][0]:
+            latest[key] = (week, team)
+    return {key: team for key, (_week, team) in latest.items()}
+
+
 def parse_nba_game_log_rows(rows: list) -> dict:
     """LeagueGameLog records (list of dicts) -> same shape as the
     nflverse parser. Rows with no stat line (did-not-play) are
@@ -319,6 +369,34 @@ def parse_nba_player_index_rows(rows: list) -> dict:
     return positions
 
 
+def parse_nba_player_index_teams(rows: list) -> dict:
+    """PlayerIndex records (list of dicts) -> {normalized name:
+    team abbreviation}. The abbreviation is the feed's own
+    TEAM_ABBREVIATION for the player's current team. Rows with
+    no name, no team, or a defunct flag are skipped — an
+    unstated team stays unknown, never filled in from
+    anything else."""
+    teams: dict[str, str] = {}
+    for row in rows:
+        # Feed cells can arrive as NaN floats (pandas) — coerce
+        # everything through text first, never .strip() a float.
+        def _s(value) -> str:
+            if value is None or (isinstance(value, float) and value != value):
+                return ""
+            return str(value).strip()
+
+        if _s(row.get("IS_DEFUNCT")) in ("1", "True", "true"):
+            continue
+        first = _s(row.get("PLAYER_FIRST_NAME"))
+        last = _s(row.get("PLAYER_LAST_NAME"))
+        abbr = _s(row.get("TEAM_ABBREVIATION"))
+        if not abbr or (not first and not last):
+            continue
+        name = " ".join(part for part in (first, last) if part)
+        teams[normalize_name(name)] = abbr
+    return teams
+
+
 class StatsStore:
     """Disk-cached access to both feeds. Every failure returns
     None — the app then runs odds-only, exactly as before."""
@@ -336,6 +414,7 @@ class StatsStore:
         self._nba: GameLogs | None = None
         self._nfl_tried = False
         self._nba_tried = False
+        self._nba_teams_cache: dict | None = None
 
     # ---------- cache plumbing ----------
 
@@ -359,16 +438,17 @@ class StatsStore:
     # ---------- NFL (nflverse) ----------
 
     # The cache filename carries a version: v1 files hold logs
-    # only (no positions). Reading only v2 names means a stale
-    # pre-positions cache is ignored outright instead of silently
-    # serving a week of position-less data under the 7-day TTL.
+    # only (no positions), v2 adds positions. Reading only v3
+    # names (logs + positions + teams) means a stale older
+    # cache is ignored outright instead of silently serving a
+    # week of position-less or team-less data under the TTL.
     @staticmethod
     def _nfl_cache_name(season: int) -> str:
-        return f"nflverse_{season}_v2.json"
+        return f"nflverse_{season}_v3.json"
 
     def _fetch_nflverse(self, season: int):
-        """(logs, positions) parsed from one CSV download, or
-        None on any failure."""
+        """(logs, positions, teams) parsed from one CSV
+        download, or None on any failure."""
         try:
             resp = self.session.get(
                 NFLVERSE_URL.format(season=season), timeout=60
@@ -381,6 +461,7 @@ class StatsStore:
             return (
                 parse_nflverse_csv(resp.text),
                 parse_nflverse_positions(resp.text),
+                parse_nflverse_teams(resp.text),
             )
         except Exception:
             return None
@@ -404,12 +485,13 @@ class StatsStore:
                 source_label=NFL_SOURCE,
                 season_label=str(cached.get("season", "")),
                 positions=cached.get("positions", {}) or {},
+                teams=cached.get("teams", {}) or {},
             )
             return self._nfl
         for candidate in (season, season - 1):
             fetched = self._fetch_nflverse(candidate)
             if fetched and fetched[0]:
-                logs, positions = fetched
+                logs, positions, teams = fetched
                 self._write_cache(
                     self._nfl_cache_name(candidate),
                     {
@@ -417,6 +499,7 @@ class StatsStore:
                         "season": candidate,
                         "logs": logs,
                         "positions": positions,
+                        "teams": teams,
                     },
                 )
                 self._nfl = GameLogs(
@@ -425,6 +508,7 @@ class StatsStore:
                     source_label=NFL_SOURCE,
                     season_label=str(candidate),
                     positions=positions,
+                    teams=teams,
                 )
                 return self._nfl
         return None
@@ -521,6 +605,55 @@ class StatsStore:
                 },
             )
             return positions
+        return {}
+
+    # ---------- NBA teams (PlayerIndex, roster guard only) ----------
+    # Same endpoint as positions, its OWN cache and lifecycle,
+    # and deliberately NOT loaded by nba_logs(): only the
+    # roster guard reads teams, so only a pull pays for this
+    # fetch — browsing never does. Any failure leaves the
+    # mapping empty and the guard stands down for the NBA.
+
+    def _fetch_nba_teams(self, season: str) -> dict | None:
+        try:
+            from nba_api.stats.endpoints import PlayerIndex
+        except Exception:
+            return None
+        for _attempt in range(2):  # same flaky feed — one retry
+            try:
+                result = PlayerIndex(season=season, timeout=30)
+                rows = result.get_data_frames()[0].to_dict("records")
+                teams = parse_nba_player_index_teams(rows)
+                if teams:
+                    return teams
+            except Exception:
+                continue
+        return None
+
+    def nba_teams(self) -> dict:
+        """{normalized name: team abbreviation} for the NBA,
+        disk-cached daily; {} whenever the feed won't provide
+        them."""
+        if self._nba_teams_cache is not None:
+            return self._nba_teams_cache
+        season = nba_season_for(self.today)
+        cached = self._read_cache("nba_teams.json", NBA_TTL_SECONDS)
+        if cached is not None:
+            self._nba_teams_cache = cached.get("teams", {}) or {}
+            return self._nba_teams_cache
+        teams = self._fetch_nba_teams(season)
+        if teams:
+            self._write_cache(
+                "nba_teams.json",
+                {
+                    "fetched_at": time.time(),
+                    "season": season,
+                    "teams": teams,
+                },
+            )
+            self._nba_teams_cache = teams
+            return teams
+        self._nba_teams_cache = {}
         return {}
 
 

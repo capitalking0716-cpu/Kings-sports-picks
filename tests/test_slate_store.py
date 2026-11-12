@@ -415,11 +415,13 @@ def test_app_tickets_carry_every_field_standard_and_king(tmp_path, monkeypatch):
     assert "Model v2" in tickets
     # King legs show where they were dropped from.
     assert "(dropped from" in tickets
-    # Leg rows: odds, chance, bookmaker, event, why, verdict.
+    # Leg rows: odds, chance, bookmaker, event — and, since
+    # Neko's simpler-tickets order (2026-11-12), nothing
+    # else: no explanation paragraph, no verdict paragraph.
     assert "Odds:" in tickets and "Chance:" in tickets
     assert "FixtureBook" in tickets
-    assert "The odds say about" in tickets
-    assert "Lilly's verdict:" in tickets
+    assert "The odds say about" not in tickets
+    assert "Lilly's verdict:" not in tickets
     # Footer: every total the old cards showed.
     assert "True overall chance:" in tickets
     assert "about 1 in" in tickets

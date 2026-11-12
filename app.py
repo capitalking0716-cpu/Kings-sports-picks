@@ -21,7 +21,7 @@ except Exception:  # pragma: no cover — zoneinfo is stdlib on supported Python
 
 import streamlit as st
 
-from kings_picks import breakdown, game_logs, king_style, learning, lilly, players, profiles, projection, self_test, slate_store, slip
+from kings_picks import breakdown, game_logs, king_style, learning, lilly, players, profiles, projection, roster, self_test, slate_store, slip, stats_pack
 from kings_picks.ledger import Ledger
 from kings_picks.model import SCORING_VERSION, decimal_to_american, score_prop
 from kings_picks.odds_api import OddsApiClient, market_key_for_label
@@ -318,30 +318,49 @@ def _get_stats_store():
     return store
 
 
+def _load_logs():
+    """(nfl logs, nba logs, pack stamp) for this session.
+
+    The stats fallback order, in one place: per league, the
+    live free feed first (through the shared store); a league
+    the live feed didn't answer for falls back to the bundled
+    stats pack (kings_picks/stats_pack.py) — the copy of the
+    logs shipped with the app, which is what keeps form data
+    alive where a feed is blocked (stats.nba.com answers
+    nothing from Streamlit Cloud). A league neither source
+    covers stays None, and its picks stay odds-only. The
+    stamp is the pack's "stats through" date whenever either
+    league is riding on the pack, else "".
+    """
+    try:
+        store = _get_stats_store()
+        live_nfl = store.nfl_logs()
+        live_nba = store.nba_logs()
+    except Exception:
+        live_nfl, live_nba = None, None
+    return stats_pack.merge_logs(live_nfl, live_nba)
+
+
 def _form_lookup_for(mode: str):
     """The game-log lookup for one run, or None.
 
-    Only LIVE runs ever touch the free stats feeds (nflverse
-    for the NFL, stats.nba.com for the NBA) — a run that
-    isn't live must never acquire form data, and any feed
-    failure just means this run stays odds-only. The lookup
-    hands score_all the raw log values each projection is
-    built from. The loaded logs are stashed in session state
-    so the Props page breakdown can show the same form the
-    scoring used. The feeds come through the shared store
-    (_get_stats_store) — the exact same data the Players
-    page browses.
+    Only LIVE runs ever touch the stats sources (the free
+    feeds, with the bundled stats pack as their fallback) —
+    a run that isn't live must never acquire form data, and
+    any failure just means this run stays odds-only. The
+    lookup hands score_all the raw log values each
+    projection is built from. The loaded logs are stashed in
+    session state so the Props page breakdown can show the
+    same form the scoring used. The feeds come through the
+    shared store (_get_stats_store) — the exact same data
+    the Players page browses.
     """
     if mode != "live":
         return None
-    try:
-        store = _get_stats_store()
-        nfl = store.nfl_logs()
-        nba = store.nba_logs()
-    except Exception:
-        return None
+    nfl, nba, stamp = _load_logs()
     st.session_state["nfl_logs"] = nfl
     st.session_state["nba_logs"] = nba
+    st.session_state["stats_stamp"] = stamp
     if nfl is None and nba is None:
         return None
     return game_logs.make_form_lookup(nfl, nba)
@@ -580,11 +599,17 @@ def _form_test_html(pick) -> str:
 def render_parlay(parlay, mode: str):
     """One parlay as an authentic bet ticket.
 
-    Same data the old cards showed — every field — laid out
-    like a sportsbook slip: shop header, ticket number, the
-    pull's timestamp, one row per leg (with the King legs'
-    dropped/raised notes), dashed perforations, and a footer
-    with the totals and Lilly's honest line as the terms.
+    Laid out like a sportsbook slip: shop header, ticket
+    number, the pull's timestamp, one row per leg (with the
+    King legs' dropped/raised notes), dashed perforations,
+    and a footer with the totals and Lilly's honest line as
+    the terms. The legs themselves are SIMPLE (Neko's order,
+    2026-11-12): the pick, its odds and chance, the odds-only
+    flag when it applies, the form-test line, the King note —
+    no explanation paragraph and no verdict paragraph. He
+    set the parameters; the ticket doesn't re-teach them.
+    (The why/verdict prose still lives on the Props page,
+    where he goes to dig in.)
     """
     style_tag = (
         "👑 KING'S STYLE"
@@ -601,8 +626,13 @@ def render_parlay(parlay, mode: str):
     )
     legs_html = ""
     for pick in parlay.picks:
-        verdict, reason = lilly.verdict_for_pick(pick.probability, pick.has_form_data, pick.edge)
-        odds_only = "⚠️ Odds-only — no recent-form data" if not pick.has_form_data else "✅ Recent form included"
+        # The odds-only flag prints only when it applies —
+        # a form-backed leg needs no flag line at all.
+        odds_only = (
+            "⚠️ Odds-only — no recent-form data<br>"
+            if not pick.has_form_data
+            else ""
+        )
         # King-style annotations (kings_picks/king_style.py):
         # a dropped leg names the line it came from, and a
         # kept leg says plainly why it is still standard.
@@ -620,11 +650,9 @@ def render_parlay(parlay, mode: str):
             f"<b>{title}</b><br>"
             f"Odds: {pick.odds:+d} &nbsp;|&nbsp; Chance: <b>{pick.probability:.0%}</b> &nbsp;|&nbsp; "
             f"{pick.bookmaker or ''} &nbsp;|&nbsp; {pick.event}<br>"
-            f"{odds_only}<br>"
+            f"{odds_only}"
             f"{_form_test_html(pick)}"
             f"{king_html}"
-            f"<i>{pick.why}</i><br>"
-            f"<b>Lilly's verdict: {verdict}</b> — {reason}"
             f"</div>"
         )
     try:
@@ -725,9 +753,11 @@ def _self_test_logs() -> dict:
     nba = st.session_state.get("nba_logs")
     if nfl is None and nba is None:
         try:
-            store = _get_stats_store()
-            nfl = store.nfl_logs()
-            nba = store.nba_logs()
+            # Read-only: unlike _form_lookup_for this does NOT
+            # stash what it loaded — the self-test is a report,
+            # and a fallback load must never shadow the logs a
+            # later run (or a later pull) brings in.
+            nfl, nba, _stamp = _load_logs()
         except Exception:
             return {}
     return {"NFL": nfl, "NBA": nba}
@@ -924,6 +954,54 @@ def _grade_king_legs(king_parlays) -> None:
             leg.form_record = grade.form_label
 
 
+def _roster_index():
+    """The roster index for this run's logs: who plays for
+    whom, from the loaded game logs (live feeds or the
+    bundled pack). NBA logs loaded live carry no teams —
+    those ride a separate PlayerIndex side-feed with its own
+    daily cache — so attach them when the store can provide
+    them; logs that already carry teams (the pack's) are
+    left alone."""
+    nfl = st.session_state.get("nfl_logs")
+    nba = st.session_state.get("nba_logs")
+    if nba is not None and not getattr(nba, "teams", None):
+        try:
+            teams = _get_stats_store().nba_teams()
+        except Exception:
+            teams = {}
+        if teams:
+            nba.teams = dict(teams)
+    return roster.build_index(nfl, nba)
+
+
+def _apply_roster_guard(props):
+    """Validate a fresh pull's legs against the rosters
+    (kings_picks/roster.py) BEFORE anything is scored.
+
+    Returns (props, note_fragment). A leg naming a player
+    who isn't in the listed game is dropped here — never
+    scored, never picked, never logged — and the fragment
+    reports how many. When the index didn't load, everything
+    is kept and the fragment says the check didn't run,
+    rather than the slate silently going unchecked.
+    """
+    try:
+        kept, dropped, active = roster.guard_props(props, _roster_index())
+    except Exception:
+        return props, ""
+    if not active:
+        return props, (
+            "🛡️ Roster check unavailable this pull — the player "
+            "index didn't load, so legs weren't checked against rosters."
+        )
+    if dropped:
+        return kept, (
+            f"🛡️ {dropped} glitched leg(s) thrown out — player not "
+            "in the listed game."
+        )
+    return kept, ""
+
+
 def run_algorithm(force_refresh: bool = False):
     props, mode, note = load_props(force_refresh=force_refresh)
     if mode != "live":
@@ -950,6 +1028,12 @@ def run_algorithm(force_refresh: bool = False):
 
     form_lookup = _form_lookup_for(mode)
     learning_lookup = _learning_lookup_for(mode)
+    # Roster guard: a glitched leg — a player listed under a
+    # game he isn't in — dies here, before scoring. It is
+    # never picked and never logged.
+    props, guard_note = _apply_roster_guard(props)
+    if guard_note:
+        note = f"{note} | {guard_note}"
     scored = score_all(
         props, form_lookup=form_lookup, learning_lookup=learning_lookup
     )
@@ -1141,6 +1225,13 @@ if page == "Dashboard":
     st.title("👑 Kings Sports Books Picks")
     st.subheader("Today's parlays — built by Lilly")
     _render_gameday_header()
+    _pack_stamp = stats_pack.load_pack()[2]
+    if _pack_stamp:
+        st.caption(
+            f"📦 Backup stats pack aboard — player stats through "
+            f"{_pack_stamp}. Lilly falls back to it whenever a live "
+            "stats feed can't be reached."
+        )
 
     if st.session_state["parlays"]:
         st.markdown(
@@ -1490,6 +1581,13 @@ elif page == "Players":
             logs = store.nfl_logs() if league == "NFL" else store.nba_logs()
     except Exception:
         logs = None
+    pack_stamp = ""
+    if logs is None:
+        # The live feed didn't answer — the bundled stats
+        # pack is this page's backup copy, the same fallback
+        # the scoring path uses.
+        _pack_nfl, _pack_nba, pack_stamp = stats_pack.load_pack()
+        logs = _pack_nfl if league == "NFL" else _pack_nba
     if logs is None:
         st.markdown(
             f"<div class='warn-box'><b>The {league} stats feed didn't answer "
@@ -1502,6 +1600,11 @@ elif page == "Players":
     else:
         season_note = f" · {logs.season_label} season" if logs.season_label else ""
         st.caption(f"Player stats: {logs.source_label}{season_note}")
+        if logs.source_label == stats_pack.SOURCE_LABEL and pack_stamp:
+            st.caption(
+                f"📦 The live feed didn't answer, so this is the bundled "
+                f"stats pack — stats through {pack_stamp}."
+            )
         st.caption(
             "Stats are independent of the odds and the algorithm — the "
             "algorithm reads from this same feed when it scores picks."
