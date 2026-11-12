@@ -12,9 +12,9 @@ from datetime import datetime, timedelta
 
 import streamlit as st
 
-from kings_picks import breakdown, demo_data, game_logs, lilly, players, profiles
+from kings_picks import breakdown, demo_data, game_logs, lilly, players, profiles, projection
 from kings_picks.ledger import Ledger
-from kings_picks.model import score_prop
+from kings_picks.model import SCORING_VERSION, score_prop
 from kings_picks.odds_api import OddsApiClient
 from kings_picks.parlays import build_parlays
 from kings_picks.pick_log import PickLog
@@ -269,16 +269,17 @@ def _get_stats_store():
 
 
 def _form_lookup_for(mode: str):
-    """The real-form lookup for one run, or None.
+    """The game-log lookup for one run, or None.
 
     Only LIVE runs ever touch the free stats feeds (nflverse
     for the NFL, stats.nba.com for the NBA) — demo runs must
     never acquire form data, and any feed failure just means
-    this run stays odds-only. The loaded logs are stashed in
-    session state so the Props page breakdown can show the
-    same form the scoring used. The feeds come through the
-    shared store (_get_stats_store) — the exact same data the
-    Players page browses.
+    this run stays odds-only. The lookup hands score_all the
+    raw log values each projection is built from. The loaded
+    logs are stashed in session state so the Props page
+    breakdown can show the same form the scoring used. The
+    feeds come through the shared store (_get_stats_store) —
+    the exact same data the Players page browses.
     """
     if mode != "live":
         return None
@@ -298,9 +299,18 @@ def _form_lookup_for(mode: str):
 def score_all(props, form_lookup=None):
     """Score props. Opposite-side odds are paired where both sides exist,
     so the bookmaker's cut is taken out. Where a real game-log feed
-    matched the player, recent form is blended in by the model and
-    the pick is labelled as having form data; everywhere else the
-    pick is honestly labelled odds-only."""
+    matched the player, the projection model (kings_picks/projection.py)
+    turns his log into a chance and the model blends it half-and-half
+    with the odds, and the pick is labelled as having form data;
+    everywhere else the pick is honestly labelled odds-only.
+
+    A matched log with fewer games than the projection model needs
+    (5) yields NO projection and the pick stays odds-only —
+    deliberately NO fallback to the old raw hit-rate: the
+    calibration proof (validation/projection-calibration-
+    2026-11-12.md) showed that ingredient was worse than always
+    saying 50% in the NBA, so it was retired, not kept as a spare.
+    """
     by_line: dict = {}
     for p in props:
         by_line.setdefault((p.player, p.sport, p.prop, p.line), {})[p.side] = p.odds
@@ -308,11 +318,19 @@ def score_all(props, form_lookup=None):
     for p in props:
         pair = by_line.get((p.player, p.sport, p.prop, p.line), {})
         other_side = "Under" if p.side == "Over" else "Over"
-        form = form_lookup(p) if form_lookup is not None else None
-        if form is not None:
+        values = form_lookup(p) if form_lookup is not None else None
+        form_probability = None
+        proj = None
+        if values:
+            form_probability = projection.over_probability(values, p.line, p.side)
+            if form_probability is not None:
+                proj = projection.project_stat(values)
+        if form_probability is not None and proj is not None:
             scored.append(
                 score_prop(p, pair_odds=pair.get(other_side),
-                           recent_hits=form[0], recent_games=form[1])
+                           form_probability=form_probability,
+                           projected_value=proj.expected,
+                           projection_games=proj.games)
             )
         else:
             scored.append(score_prop(p, pair_odds=pair.get(other_side)))
@@ -399,8 +417,8 @@ def run_algorithm(force_refresh: bool = False):
     st.session_state["mode"] = mode
     st.session_state["note"] = note + (" | " + " | ".join(build_notes) if build_notes else "")
     if parlays:
-        LEDGER.record_run(parlays, mode, profile=active_profile)
-        PICK_LOG.record_run(parlays, mode)
+        LEDGER.record_run(parlays, mode, profile=active_profile, model=SCORING_VERSION)
+        PICK_LOG.record_run(parlays, mode, model=SCORING_VERSION)
     return parlays, mode, note
 
 
@@ -766,6 +784,11 @@ elif page == "Results / Ledger":
         "played it or not**. Settlement is by hand — no free feed has final player "
         "stats, so after the games you tap Won or Lost here. Lilly never guesses a result."
     )
+    st.caption(
+        "Scoring eras: picks tagged **v2** were scored with Lilly's projection "
+        "model; older **v1** picks used the retired hit-rate blend. The tag is "
+        "on every pick below and rides along in the backup exports."
+    )
     pstats = PICK_LOG.stats(profile=active_profile)
     pc1, pc2, pc3, pc4 = st.columns(4)
     pc1.metric("Picks logged", pstats["total"])
@@ -800,7 +823,7 @@ elif page == "Results / Ledger":
                 i_played = active_profile in entry.played_by
                 st.markdown(
                     f"<div class='pick-card'>"
-                    f"<b style='font-size:17px'>{entry.label}</b> — {entry.sport}{demo_tag}<br>"
+                    f"<b style='font-size:17px'>{entry.label}</b> — {entry.sport}{demo_tag} · {entry.model}<br>"
                     f"{entry.event} &nbsp;|&nbsp; Odds: {entry.odds:+d} &nbsp;|&nbsp; "
                     f"Chance: <b>{entry.probability:.0%}</b>"
                     f"</div>",
@@ -828,7 +851,7 @@ elif page == "Results / Ledger":
                     f" · played by {', '.join(entry.played_by)}" if entry.played_by else ""
                 )
                 st.write(
-                    f"{mark} — **{entry.label}** — {entry.event} · {entry.date}{demo_tag}{played_note}"
+                    f"{mark} — **{entry.label}** — {entry.event} · {entry.date}{demo_tag} · {entry.model}{played_note}"
                 )
             if len(settled_entries) > 30:
                 st.caption(f"Showing the newest 30 of {len(settled_entries)} settled picks.")
@@ -853,7 +876,7 @@ elif page == "Results / Ledger":
         {
             "id": lp.id, "date": lp.date, "size": lp.size, "label": lp.label,
             "overall_probability": lp.overall_probability, "mode": lp.mode,
-            "profile": lp.profile, "settled": lp.settled,
+            "profile": lp.profile, "model": lp.model, "settled": lp.settled,
             "picks_won": lp.picks_won, "picks_lost": lp.picks_lost,
             "picks_pending": lp.picks_pending,
         }

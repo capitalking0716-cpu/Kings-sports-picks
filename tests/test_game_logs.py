@@ -155,7 +155,9 @@ def test_make_form_lookup_rules():
     lookup = game_logs.make_form_lookup(nfl, None)
     live = Prop(player="Patrick Mahomes", sport="NFL", prop="Passing Yards",
                 side="Over", line=249.5, odds=-110, source="live")
-    assert lookup(live) == (2, 3)
+    # v2: the lookup hands scoring the RAW LOG VALUES (newest
+    # first) for the projection model — not a hit-rate count.
+    assert lookup(live) == [250.0, 300.0, 200.0]
     demo = Prop(player="Patrick Mahomes", sport="NFL", prop="Passing Yards",
                 side="Over", line=249.5, odds=-110, source="demo")
     assert lookup(demo) is None  # demo NEVER acquires form
@@ -406,7 +408,8 @@ def test_app_props_breakdown_shows_recent_form_when_feed_matched():
     prop = Prop(player="Patrick Mahomes", sport="NFL", prop="Passing Yards",
                 side="Over", line=249.5, odds=-110, bookmaker="DraftKings",
                 event="Chiefs vs Bills", source="live")
-    scored_pick = score_prop(prop, pair_odds=-110, recent_hits=2, recent_games=3)
+    scored_pick = score_prop(prop, pair_odds=-110, form_probability=0.55,
+                             projected_value=262.0, projection_games=8)
     at.session_state["scored"] = [scored_pick]
     at.session_state["raw_props"] = [
         prop,

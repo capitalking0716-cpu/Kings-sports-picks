@@ -248,10 +248,37 @@ def build_breakdown(pick, scored, parlays, pair_odds: int | None = None, form=No
             f"cleaned-up odds ({fair:.0%})" if move <= -0.5 else
             f"left Lilly's number about where the cleaned-up odds put it ({fair:.0%})"
         )
+        # The hit-rate above is descriptive — what the scoring
+        # actually blended in is the projection model's chance,
+        # so say so, with its numbers, whenever the pick carries
+        # them. The move in `direction` is measured from the real
+        # blended number, so it is the projection ingredient's
+        # move, not the hit-rate's.
+        projection_sentence = ""
+        if pick.form_probability is not None:
+            if pick.prop == "Anytime Touchdown":
+                projection_sentence = (
+                    f" What her scoring blended in is her projection model's "
+                    f"number: it puts this side at {pick.form_probability:.0%} "
+                    f"from his scoring log."
+                )
+            elif pick.projected_value is not None:
+                projection_sentence = (
+                    f" What her scoring blended in is her projection model's "
+                    f"number: about {pick.projected_value:.0f} "
+                    f"{pick.prop.lower()} projected, putting this side at "
+                    f"{pick.form_probability:.0%}."
+                )
+            else:
+                projection_sentence = (
+                    f" What her scoring blended in is her projection model's "
+                    f"number: {pick.form_probability:.0%} for this side."
+                )
         reasons.append(
             f"Recent form ({form.source_label}): this player went "
             f"{pick.side.lower()} {pick.line:g} in {form.hits} of his last "
-            f"{form.games} games. That {direction}. Form is supporting "
+            f"{form.games} games.{projection_sentence} That {direction}. "
+            "Form is supporting "
             "evidence only — the chance still starts from the odds, and "
             "form never turns a pick into a promise."
         )

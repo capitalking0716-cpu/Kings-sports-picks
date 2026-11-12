@@ -78,12 +78,18 @@ def test_score_odds_only_never_invents_form():
 
 
 def test_score_with_real_form_blends_half_and_half():
-    s = score_prop(make_prop(), pair_odds=-110, recent_hits=6, recent_games=8)
-    # implied 0.5, hit rate 0.75 -> 0.625
+    # v2 ingredient: a projection probability (from projection.py,
+    # computed upstream from the player's real game log), blended
+    # half-and-half with the de-vigged odds — the same blend shape
+    # as v1, a different (proven) ingredient.
+    s = score_prop(make_prop(), pair_odds=-110, form_probability=0.75,
+                   projected_value=28.0, projection_games=9)
+    # implied 0.5, projection 0.75 -> 0.625
     assert s.has_form_data is True
     assert s.probability == pytest.approx(0.625)
     assert s.edge == pytest.approx(0.125)
-    assert "6 of last 8" in s.why
+    assert s.form_probability == pytest.approx(0.75)
+    assert "Projection: about 28 points" in s.why
 
 
 def test_score_under_uses_opposite_side():

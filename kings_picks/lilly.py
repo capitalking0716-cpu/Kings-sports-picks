@@ -27,11 +27,17 @@ promise you a win — nobody honest can.
 1. I take the odds the sportsbooks offer and turn them into a
    plain chance (like "this wins about 60 times out of 100").
    I take the bookmaker's cut out first, so the number is fair.
-2. If I have real recent games for a player, I blend that in —
-   half the odds, half what he just did. NFL form comes free
-   from nflverse; NBA form comes from stats.nba.com when that
-   feed answers. Players no feed covers stay **odds-only**,
-   and I say so on the pick itself. I never invent a number.
+2. If I have real recent games for a player, I project his
+   next game from them — his season, his last 10 and his last
+   5, weighted toward the recent ones, with his own
+   game-to-game spread — and blend that projection with the
+   odds, half and half. NFL form comes free from nflverse;
+   NBA form comes from stats.nba.com when that feed answers.
+   Players no feed covers stay **odds-only**, and I say so on
+   the pick itself. I never invent a number. (I used to blend
+   in a raw "how often did he clear the line lately" rate —
+   I tested it against my projection on nearly 11,000 real
+   past games, the old way lost, and I retired it.)
 3. I build your parlays from the highest-chance picks, and I
    show the TRUE overall chance of each parlay. A 10-pick
    parlay is a long shot even when it is the best one possible
@@ -69,13 +75,14 @@ def verdict_for_pick(probability: float, has_form_data: bool, edge: float) -> tu
     if edge >= 0.05:
         return (
             "good play",
-            f"Recent form beats the odds by {edge:.0%} — the player has been "
-            f"clearing this line, and the price still pays fairly. "
-            f"Chance about {probability:.0%}. Still not a promise.",
+            f"Lilly's projection from his own games beats the odds by {edge:.0%} — "
+            f"his projected numbers clear this line more often than the price "
+            f"gives him credit for. Chance about {probability:.0%}. "
+            f"Still not a promise.",
         )
     return (
         "fix this first",
-        f"Chance about {probability:.0%}, but the recent form does not beat "
+        f"Chance about {probability:.0%}, but Lilly's projection does not beat "
         "the odds by much. It is an okay pick, not a strong one.",
     )
 
@@ -126,8 +133,10 @@ def chat_reply(message: str) -> str:
         return (
             "Simple version: I take the sportsbook's odds, turn them into a "
             "chance out of 100, and take the bookmaker's cut out so the number "
-            "is fair. If I have a player's recent games, I blend that in — half "
-            "odds, half recent form. If I do not, the pick says 'odds-only' and "
+            "is fair. If I have a player's real games, I project his next one "
+            "from them — his season, his last 10, his last 5, and how much his "
+            "numbers swing game to game — and blend that projection in, half "
+            "and half with the odds. If I do not, the pick says 'odds-only' and "
             "I do not pretend to know more."
         )
     if any(w in text for w in ("bankroll", "money", "bet", "stake", "how much")):

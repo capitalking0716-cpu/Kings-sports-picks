@@ -526,21 +526,34 @@ class StatsStore:
 
 def make_form_lookup(nfl: GameLogs | None, nba: GameLogs | None):
     """Build the callable score_all consumes:
-    lookup(prop) -> (hits, games) | None.
+    lookup(prop) -> the player's game values for the prop's
+    stat, newest first, or None.
 
-    Demo props NEVER get form. Unmatched players stay odds-only.
-    The hits are counted for the prop's own side of its line.
+    Since the v2 wiring (2026-11-12) the scoring path feeds
+    these raw values to kings_picks/projection.py — the form
+    ingredient is the projection model's chance, NOT the share
+    of games that went over the line. This lookup used to
+    return (hits, games); that return is gone on purpose. The
+    calibration proof (validation/projection-calibration-
+    2026-11-12.md) showed the raw hit-rate was worse than
+    always saying 50% in the NBA, so it must never sneak back
+    in as an ingredient. Counting hits (summarize, above) is
+    display-only now: the Players page and the breakdown's
+    Recent form section show it as descriptive stats.
+
+    Demo props NEVER get form. Unmatched players stay
+    odds-only. A matched log shorter than the projection
+    model's minimum (5 games) still comes back here — the
+    projection returns None for it and scoring stays
+    odds-only, with no hit-rate fallback.
     """
 
-    def lookup(prop) -> tuple[int, int] | None:
+    def lookup(prop) -> list | None:
         if getattr(prop, "source", "live") == "demo":
             return None
         logs = nfl if prop.sport == "NFL" else nba if prop.sport == "NBA" else None
         if logs is None:
             return None
-        summary = logs.form(prop.player, prop.prop, prop.side, prop.line)
-        if summary is None or summary.games == 0:
-            return None
-        return summary.hits, summary.games
+        return logs.values(prop.player, prop.prop)
 
     return lookup

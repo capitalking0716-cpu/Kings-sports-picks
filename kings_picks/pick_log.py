@@ -21,6 +21,14 @@ Honesty rules, same as the ledger: demo picks are logged with
 mode="demo" and are NEVER mixed into the headline hit-rate
 stats. Demo numbers are reported separately, or not at all.
 
+Every entry also carries a `model` tag — the scoring era that
+produced the pick ("v2" = the projection-model blend, wired
+2026-11-12; "v1" = the retired hit-rate blend). Entries saved
+before the tag existed have no model in the JSON and load as
+"v1". The tag rides along in the JSON/CSV backup exports, so
+Lilly's record can be split by era later and v2 has to prove
+itself against v1 on settled picks, not on promises.
+
 Paper tracking only. No real bets, no money moved.
 """
 
@@ -32,6 +40,7 @@ from datetime import date
 from pathlib import Path
 
 from . import profiles as _profiles
+from .model import SCORING_VERSION
 
 OPEN = "open"
 WON = "won"
@@ -65,6 +74,11 @@ class PickEntry:
     label: str = ""  # display label, e.g. "Player — Points Over 24.5"
     status: str = OPEN  # open | won | lost
     played_by: list = field(default_factory=list)  # profile names
+    # Scoring era that produced this pick: "v2" (projection
+    # blend) or "v1" (retired hit-rate blend). Entries saved
+    # before this field existed load with the "v1" default —
+    # everything scored before the v2 wiring IS v1.
+    model: str = "v1"
 
 
 class PickLog:
@@ -87,13 +101,24 @@ class PickLog:
 
     # ---------- recording ----------
 
-    def record_run(self, parlays, mode: str, created: str | None = None) -> list[PickEntry]:
+    def record_run(
+        self,
+        parlays,
+        mode: str,
+        created: str | None = None,
+        model: str = SCORING_VERSION,
+    ) -> list[PickEntry]:
         """Log every leg of every parlay as an individual pick.
 
         Deduped by pick key: a pick that is already logged for
         that date (same event / player / market / line) is not
         logged twice, however many parlays share the leg or
         however often the algorithm re-runs that day.
+
+        `model` is the scoring era of the RUN (the run's scoring
+        version — every pick in the run gets it, odds-only picks
+        included; an odds-only pick in a v2 run is still a v2-era
+        pick). It defaults to the current scoring version.
 
         Returns only the entries that were newly added.
         """
@@ -120,6 +145,7 @@ class PickLog:
                     probability=float(pick.probability),
                     mode=mode,
                     label=pick.label,
+                    model=model,
                 )
                 self.entries.append(entry)
                 added.append(entry)

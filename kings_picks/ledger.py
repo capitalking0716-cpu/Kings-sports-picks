@@ -17,6 +17,11 @@ Each entry is tagged with the profile that recorded it ("King"
 or "Kohen"), and each profile has its own record and hit rates.
 Entries saved before profiles existed have no tag and count as
 King's.
+
+Each entry also carries a `model` tag — the scoring era that
+built it ("v2" = the projection-model blend, wired 2026-11-12;
+"v1" = the retired hit-rate blend). Entries saved before the
+tag existed load as "v1".
 """
 
 from __future__ import annotations
@@ -28,6 +33,7 @@ from datetime import date
 from pathlib import Path
 
 from . import profiles as _profiles
+from .model import SCORING_VERSION
 
 
 @dataclass
@@ -53,6 +59,10 @@ class LedgerParlay:
     # before profiles existed have no profile in the JSON and load
     # with this default — legacy / demo data counts as King's.
     profile: str = _profiles.DEFAULT_PROFILE
+    # Scoring era that built this parlay ("v2" projection blend /
+    # "v1" retired hit-rate blend). Same legacy rule: entries
+    # saved before the field existed load as "v1".
+    model: str = "v1"
 
     @property
     def picks_won(self) -> int:
@@ -91,11 +101,19 @@ class Ledger:
     def _save(self) -> None:
         self.path.write_text(json.dumps([asdict(p) for p in self.parlays], indent=2))
 
-    def record_run(self, parlays, mode: str, profile: str = _profiles.DEFAULT_PROFILE) -> list[str]:
+    def record_run(
+        self,
+        parlays,
+        mode: str,
+        profile: str = _profiles.DEFAULT_PROFILE,
+        model: str = SCORING_VERSION,
+    ) -> list[str]:
         """Save a fresh set of built parlays under `profile`'s record.
 
         Returns their IDs. Unknown profile names fall back to King's,
         matching how legacy entries (no profile field) are treated.
+        `model` is the scoring era of the run and defaults to the
+        current scoring version.
         """
         profile = _profiles.normalize_profile(profile)
         ids: list[str] = []
@@ -109,6 +127,7 @@ class Ledger:
                 overall_probability=parlay.overall_probability,
                 mode=mode,
                 profile=profile,
+                model=model,
                 picks=[
                     asdict(LedgerPick(key=p.key, label=p.label, probability=p.probability, odds=p.odds))
                     for p in parlay.picks
