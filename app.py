@@ -21,7 +21,7 @@ except Exception:  # pragma: no cover — zoneinfo is stdlib on supported Python
 
 import streamlit as st
 
-from kings_picks import breakdown, game_logs, king_style, learning, lilly, picks_export, players, profiles, projection, roster, self_test, slate_store, slip, special_picks, stats_pack
+from kings_picks import breakdown, game_logs, king_style, learning, lilly, log_export, picks_export, players, profiles, projection, roster, self_test, slate_store, slip, special_picks, stats_pack
 from kings_picks.ledger import Ledger
 from kings_picks.model import SCORING_VERSION, decimal_to_american, score_prop
 from kings_picks.odds_api import OddsApiClient, market_key_for_label
@@ -1385,15 +1385,18 @@ def _render_special_picks_section():
 
 
 def _render_picks_download():
-    """⬇️ Download my picks (plain English) — the selected
-    date's stored slate as one text file for Neko's phone
-    (kings_picks/picks_export.py), with his own tested
-    My Slip picks riding in it too. Built from what the
-    app already holds: no new pull, no rescore, zero quota.
-    The tickets are the same for both profiles — the picks
-    are shared; the slip section is the signed-in
-    profile's own. With nothing to download, a short note
-    stands where the button would be — never an empty file."""
+    """⬇️ Download my picks — the selected date's stored
+    slate as a file for Neko's phone, in two forms from the
+    same content (kings_picks/picks_export.py): the plain-
+    English text file and a Word (.docx) twin he can read
+    back (his order 2026-11-14: "my logs should all be word
+    files"). His own tested My Slip picks ride in both.
+    Built from what the app already holds: no new pull, no
+    rescore, zero quota. The tickets are the same for both
+    profiles — the picks are shared; the slip section is the
+    signed-in profile's own. With nothing to download, a
+    short note stands where the buttons would be — never an
+    empty file."""
     no_slate_note = (
         "📥 Once Lilly has built your picks, a button appears here "
         "to download the whole pull as a plain-English file you "
@@ -1415,7 +1418,7 @@ def _render_picks_download():
     if not parlays and not king_parlays and not own_legs and not special:
         st.caption(no_slate_note)
         return
-    text = picks_export.build_picks_text(
+    export_args = dict(
         pulled_at=st.session_state.get("pulled_at", ""),
         parlays=parlays,
         king_parlays=king_parlays,
@@ -1426,6 +1429,7 @@ def _render_picks_download():
         slip_profile=profiles.PROFILE_LABELS[active_profile],
         special_parlays=special,
     )
+    text = picks_export.build_picks_text(**export_args)
     if not text:
         st.caption(no_slate_note)
         return
@@ -1434,13 +1438,32 @@ def _render_picks_download():
         slate_date
         or (pulled_at[:10] if pulled_at else datetime.now().date().isoformat())
     )
-    st.download_button(
+    dl_text, dl_word = st.columns(2)
+    dl_text.download_button(
         "⬇️ Download my picks (plain English)",
         data=text,
         file_name=f"lillys-picks-{date_part}.txt",
         mime="text/plain",
         key="dl-picks-plain",
     )
+    # The Word twin: same content, same blocks, real Word
+    # headings. If the Word library is somehow missing the
+    # text button still stands on its own.
+    try:
+        docx_bytes = picks_export.build_picks_docx(**export_args)
+    except ImportError:
+        docx_bytes = b""
+    if docx_bytes:
+        dl_word.download_button(
+            "⬇️ Download my picks (Word)",
+            data=docx_bytes,
+            file_name=f"lillys-picks-{date_part}.docx",
+            mime=(
+                "application/vnd.openxmlformats-officedocument."
+                "wordprocessingml.document"
+            ),
+            key="dl-picks-word",
+        )
 
 
 def _self_test_logs() -> dict:
@@ -2911,6 +2934,34 @@ elif page == "Results / Ledger":
         file_name=f"lilly-lessons-{today_str}.jsonl", mime="application/json",
         key="dl-lessons-jsonl",
     )
+    # The readable one: the signed-in profile's own record as
+    # a Word file he can open and read back on his phone
+    # (Neko, 2026-11-14: "my logs should all be word files").
+    # kings_picks/log_export.py, from the same ledger the
+    # backups above export raw. If the Word library is
+    # somehow missing, the raw backups still stand.
+    try:
+        log_docx = log_export.build_log_docx(
+            LEDGER.parlays_for_profile(active_profile),
+            profiles.PROFILE_LABELS[active_profile],
+        )
+    except ImportError:
+        log_docx = b""
+    if log_docx:
+        st.download_button(
+            "⬇️ My pick log — Word", data=log_docx,
+            file_name=f"pick-log-{active_profile.lower()}-{today_str}.docx",
+            mime=(
+                "application/vnd.openxmlformats-officedocument."
+                "wordprocessingml.document"
+            ),
+            key="dl-picklog-word",
+        )
+    else:
+        st.caption(
+            "📒 Once tickets are on your record, a button appears here to "
+            "download your pick log as a Word file you can read back."
+        )
 
 # ================= SETUP =================
 elif page == "Setup":
