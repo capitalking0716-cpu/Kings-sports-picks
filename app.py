@@ -21,7 +21,7 @@ except Exception:  # pragma: no cover — zoneinfo is stdlib on supported Python
 
 import streamlit as st
 
-from kings_picks import breakdown, game_logs, king_style, learning, lilly, players, profiles, projection, roster, self_test, slate_store, slip, stats_pack
+from kings_picks import breakdown, game_logs, king_style, learning, lilly, picks_export, players, profiles, projection, roster, self_test, slate_store, slip, stats_pack
 from kings_picks.ledger import Ledger
 from kings_picks.model import SCORING_VERSION, decimal_to_american, score_prop
 from kings_picks.odds_api import OddsApiClient, market_key_for_label
@@ -742,6 +742,59 @@ def _render_slip_ticket(legs, summary, profile):
     )
 
 
+def _picks_download_teams() -> dict:
+    """{sport: {name key: team text}} for the plain-English
+    download's player (Team) labels — from the same loaded
+    logs the self-test reads (the live feeds when they
+    answered, the bundled stats pack as fallback; zero Odds
+    API quota either way)."""
+    logs = _self_test_logs()
+    return {
+        sport: (getattr(logs.get(sport), "teams", None) or {})
+        for sport in ("NFL", "NBA")
+    }
+
+
+def _render_picks_download():
+    """⬇️ Download my picks (plain English) — the current
+    stored slate as one text file for Neko's phone
+    (kings_picks/picks_export.py). Built from the slate the
+    app already holds: no new pull, no rescore, zero quota,
+    and the same for both profiles — the picks are shared.
+    With no slate yet, a short note stands where the button
+    would be — never an empty file."""
+    no_slate_note = (
+        "📥 Once Lilly has built your picks, a button appears here "
+        "to download the whole pull as a plain-English file you "
+        "can keep on your phone."
+    )
+    parlays = st.session_state.get("parlays", [])
+    king_parlays = st.session_state.get("king_parlays", [])
+    if not parlays and not king_parlays:
+        st.caption(no_slate_note)
+        return
+    text = picks_export.build_picks_text(
+        pulled_at=st.session_state.get("pulled_at", ""),
+        parlays=parlays,
+        king_parlays=king_parlays,
+        teams=_picks_download_teams(),
+    )
+    if not text:
+        st.caption(no_slate_note)
+        return
+    pulled_at = st.session_state.get("pulled_at", "")
+    date_part = (
+        pulled_at[:10] if pulled_at else datetime.now().date().isoformat()
+    )
+    st.download_button(
+        "⬇️ Download my picks (plain English)",
+        data=text,
+        file_name=f"lillys-picks-{date_part}.txt",
+        mime="text/plain",
+        key="dl-picks-plain",
+    )
+
+
 def _self_test_logs() -> dict:
     """The game logs the self-test grades against: the ones the
     last live run already loaded (stashed in session state by
@@ -1290,6 +1343,11 @@ if page == "Dashboard":
         for parlay in st.session_state["parlays"]:
             render_parlay(parlay, st.session_state["mode"])
             st.markdown("---")
+
+    # ⬇️ The whole pull — odds and picks — as one plain-
+    # English file for his phone. Sits under the tickets it
+    # downloads; with no slate it is a short note instead.
+    _render_picks_download()
 
     # 🧪 Lilly tests her picks: her latest logged slate,
     # graded against recent game-log form. Rendered from the
