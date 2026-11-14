@@ -27,9 +27,17 @@ import json
 import os
 import time
 from dataclasses import dataclass
+from datetime import datetime, time as _time_of_day, timedelta, timezone
 from pathlib import Path
 
 import requests
+
+try:
+    from zoneinfo import ZoneInfo
+
+    _DETROIT = ZoneInfo("America/Detroit")
+except Exception:  # no tz database on this machine — fail soft
+    _DETROIT = None
 
 BASE_URL = "https://api.the-odds-api.com/v4"
 ENV_KEY = "LILLY_ODDS_API_KEY"
@@ -153,8 +161,65 @@ def get_api_key() -> str:
         return ""
 
 
-def cache_path(cache_dir: Path, sport: str) -> Path:
+def cache_path(cache_dir: Path, sport: str, game_date: str | None = None) -> Path:
+    """The props cache file for a sport — and, for a dated
+    pull (pick-the-date, 2026-11-14), for that game date
+    too, so pulling Sunday's games never overwrites the
+    cache today's slate came from."""
+    if game_date:
+        return cache_dir / f"{sport.lower()}_props_{game_date}.json"
     return cache_dir / f"{sport.lower()}_props.json"
+
+
+def event_date_detroit(commence_iso) -> str:
+    """The America/Detroit calendar date (YYYY-MM-DD) a
+    game starts on, from its commence_time — the date the
+    user picks in the app is a Detroit day, so games are
+    matched to it in Detroit, not UTC (a 7:30 PM ET tip is
+    already tomorrow in UTC). "" when the time can't be
+    read — an unreadable time never matches a picked date.
+    """
+    try:
+        parsed = datetime.fromisoformat(str(commence_iso).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return ""
+    if parsed.tzinfo is None:
+        return parsed.date().isoformat()
+    zone = _DETROIT or timezone.utc
+    return parsed.astimezone(zone).date().isoformat()
+
+
+def _friendly_date(game_date: str) -> str:
+    """'2026-11-16' -> 'Monday, November 16, 2026' for
+    plain-English messages. Falls back to the raw string."""
+    try:
+        moment = datetime.strptime(game_date, "%Y-%m-%d")
+    except (TypeError, ValueError):
+        return str(game_date)
+    return f"{moment.strftime('%A, %B')} {moment.day}, {moment.year}"
+
+
+def _detroit_day_bounds_utc(game_date: str) -> tuple[str, str] | None:
+    """(from, to) ISO timestamps bracketing one Detroit
+    calendar day, for the events endpoint's
+    commenceTimeFrom / commenceTimeTo parameters — the API
+    then only sends that day's games, and the per-event
+    odds calls (the ones that cost quota) only ever run
+    for games on the picked date. None when the day can't
+    be bracketed (no tz database): callers fall back to
+    filtering the full events list themselves."""
+    if _DETROIT is None:
+        return None
+    try:
+        day = datetime.strptime(game_date, "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return None
+    start = datetime.combine(day, _time_of_day.min, tzinfo=_DETROIT)
+    end = start + timedelta(days=1)
+    return (
+        start.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        end.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
 
 
 def _load_cache(path: Path) -> ApiResult | None:
@@ -351,14 +416,27 @@ class OddsApiClient:
                          props=[], requests_remaining=self.quota_from(resp))
 
     def fetch_props(
-        self, sport: str, force_refresh: bool = False, max_events: int = 12
+        self,
+        sport: str,
+        force_refresh: bool = False,
+        max_events: int = 12,
+        game_date: str | None = None,
     ) -> ApiResult:
         """Player props for a sport. Cached unless force_refresh.
 
         Costs quota: one priced call per event, markets x regions.
         We keep it to regions=us and only that sport's prop markets.
+
+        game_date (YYYY-MM-DD, a Detroit day) restricts the
+        pull to games starting on that date — pick-the-date
+        (2026-11-14): the events call asks the API for just
+        that day (commenceTimeFrom/To) and the events are
+        filtered to the date again here, so the priced
+        per-event calls only ever run for that day's games.
+        The cache is per date too: a dated pull never
+        overwrites another day's cached props.
         """
-        cache = cache_path(self.cache_dir, sport)
+        cache = cache_path(self.cache_dir, sport, game_date)
         if not force_refresh:
             hit = _load_cache(cache)
             if hit is not None:
@@ -369,8 +447,18 @@ class OddsApiClient:
                 "No API key set. Add your Odds API key in "
                 "Streamlit Secrets to pull live props.",
             )
+        events_params: dict = {}
+        if game_date:
+            bounds = _detroit_day_bounds_utc(game_date)
+            if bounds is not None:
+                events_params = {
+                    "commenceTimeFrom": bounds[0],
+                    "commenceTimeTo": bounds[1],
+                }
         try:
-            events_resp = self._get(f"/sports/{SPORT_KEYS[sport]}/events", {})
+            events_resp = self._get(
+                f"/sports/{SPORT_KEYS[sport]}/events", events_params
+            )
         except requests.RequestException as exc:
             return ApiResult(False, f"Could not reach The Odds API: {exc}")
         if events_resp.status_code == 401:
@@ -379,6 +467,19 @@ class OddsApiClient:
             return ApiResult(False, f"The Odds API answered {events_resp.status_code}: {events_resp.text[:200]}")
 
         events = events_resp.json()
+        if game_date:
+            events = [
+                event
+                for event in events
+                if event_date_detroit(event.get("commence_time", "")) == game_date
+            ]
+            if not events:
+                return ApiResult(
+                    True,
+                    f"No {sport} games on {_friendly_date(game_date)} — "
+                    "the books haven't posted lines for that day yet.",
+                    props=[],
+                )
         if not events:
             return ApiResult(True, f"No upcoming {sport} games right now.", props=[])
 

@@ -508,94 +508,157 @@ def build_drop_options(
     options: list[DropOption] = []
     other_side = "Under" if pick.side == "Over" else "Over"
     for new_line, step in adjusted_lines(pick.prop, pick.side, float(pick.line)):
-        form_probability = (
-            _projection.over_probability(form_values, new_line, pick.side)
-            if form_values
-            else None
+        options.append(
+            _drop_option_for_line(
+                pick, new_line, step, prices, other_side,
+                form_values=form_values, proj=proj,
+                learn_kwargs=learn_kwargs, learning=learning,
+            )
         )
-        own = prices.get((pick.side, new_line))
-        if own is not None:
-            odds, book = own
-            pair = prices.get((other_side, new_line))
-            prop = Prop(
-                player=pick.player,
-                sport=pick.sport,
-                prop=pick.prop,
-                side=pick.side,
-                line=new_line,
-                odds=odds,
-                bookmaker=book,
-                event=getattr(pick, "event", "") or "",
-                commence_time=getattr(pick, "commence_time", "") or "",
-                source=getattr(pick, "source", "live") or "live",
-                event_id=getattr(pick, "event_id", "") or "",
-            )
-            if form_probability is not None and proj is not None:
-                scored = score_prop(
-                    prop,
-                    pair_odds=pair[0] if pair else None,
-                    form_probability=form_probability,
-                    projected_value=proj.expected,
-                    projection_games=proj.games,
-                    **learn_kwargs,
-                )
-            else:
-                scored = score_prop(
-                    prop,
-                    pair_odds=pair[0] if pair else None,
-                    **learn_kwargs,
-                )
-            options.append(
-                DropOption(
-                    line=new_line,
-                    base_line=float(pick.line),
-                    step=step,
-                    side=pick.side,
-                    probability=float(scored.probability),
-                    standard_probability=float(pick.probability),
-                    odds=odds,
-                    bookmaker=book,
-                    playable=True,
-                    note=scored.why,
-                    scored=scored,
-                )
-            )
-        elif form_probability is not None:
-            # No book prices this line, but his game log does
-            # speak: show the projection's chance at the line
-            # (learning correction included, the same delta
-            # the board applies), labelled as projection-only.
-            # It can NOT join the slip — payout maths needs a
-            # real price.
-            probability = form_probability
-            if learning:
-                probability = min(max(probability + learning["delta"], 0.05), 0.95)
-            options.append(
-                DropOption(
-                    line=new_line,
-                    base_line=float(pick.line),
-                    step=step,
-                    side=pick.side,
-                    probability=float(probability),
-                    standard_probability=float(pick.probability),
-                    playable=False,
-                    note=(
-                        "Projection only — no book offers this line, so "
-                        "there's no price and it can't go on the slip."
-                    ),
-                )
+    return options
+
+
+def _drop_option_for_line(
+    pick, new_line, step, prices, other_side,
+    *, form_values=None, proj=None, learn_kwargs=None, learning=None,
+) -> DropOption:
+    """One dropped/raised version of a board selection at
+    ONE line — the single scoring path every dropped-line
+    surface shares (the step-table options from
+    build_drop_options and a line the user typed himself,
+    via custom_line_option). A priced line is scored with
+    model.score_prop at that line; an unpriced line shows
+    the projection's chance only, or an honest nothing."""
+    learn_kwargs = learn_kwargs or {}
+    form_probability = (
+        _projection.over_probability(form_values, new_line, pick.side)
+        if form_values
+        else None
+    )
+    own = prices.get((pick.side, new_line))
+    if own is not None:
+        odds, book = own
+        pair = prices.get((other_side, new_line))
+        prop = Prop(
+            player=pick.player,
+            sport=pick.sport,
+            prop=pick.prop,
+            side=pick.side,
+            line=new_line,
+            odds=odds,
+            bookmaker=book,
+            event=getattr(pick, "event", "") or "",
+            commence_time=getattr(pick, "commence_time", "") or "",
+            source=getattr(pick, "source", "live") or "live",
+            event_id=getattr(pick, "event_id", "") or "",
+        )
+        if form_probability is not None and proj is not None:
+            scored = score_prop(
+                prop,
+                pair_odds=pair[0] if pair else None,
+                form_probability=form_probability,
+                projected_value=proj.expected,
+                projection_games=proj.games,
+                **learn_kwargs,
             )
         else:
-            options.append(
-                DropOption(
-                    line=new_line,
-                    base_line=float(pick.line),
-                    step=step,
-                    side=pick.side,
-                    probability=None,
-                    standard_probability=float(pick.probability),
-                    playable=False,
-                    note="No book offers this line.",
-                )
+            scored = score_prop(
+                prop,
+                pair_odds=pair[0] if pair else None,
+                **learn_kwargs,
             )
-    return options
+        return DropOption(
+            line=new_line,
+            base_line=float(pick.line),
+            step=step,
+            side=pick.side,
+            probability=float(scored.probability),
+            standard_probability=float(pick.probability),
+            odds=odds,
+            bookmaker=book,
+            playable=True,
+            note=scored.why,
+            scored=scored,
+        )
+    if form_probability is not None:
+        # No book prices this line, but his game log does
+        # speak: show the projection's chance at the line
+        # (learning correction included, the same delta
+        # the board applies), labelled as projection-only.
+        # It can NOT join the slip — payout maths needs a
+        # real price.
+        probability = form_probability
+        if learning:
+            probability = min(max(probability + learning["delta"], 0.05), 0.95)
+        return DropOption(
+            line=new_line,
+            base_line=float(pick.line),
+            step=step,
+            side=pick.side,
+            probability=float(probability),
+            standard_probability=float(pick.probability),
+            playable=False,
+            note=(
+                "Projection only — no book offers this line, so "
+                "there's no price and it can't go on the slip."
+            ),
+        )
+    return DropOption(
+        line=new_line,
+        base_line=float(pick.line),
+        step=step,
+        side=pick.side,
+        probability=None,
+        standard_probability=float(pick.probability),
+        playable=False,
+        note="No book offers this line.",
+    )
+
+
+def custom_line_option(
+    pick,
+    alt_prices,
+    line,
+    form_values=None,
+    learning=None,
+) -> DropOption | None:
+    """The option for a line the user TYPED himself (Test
+    My Picks, 2026-11-14: "test my picks" — pick a line of
+    your own and let Lilly grade it).
+
+    Same rules as the step-table options, because it IS
+    one: the typed line goes through _drop_option_for_line,
+    so a typed line a book prices can join the slip, and
+    one no book prices is projection-only — shown for its
+    chance, never added. Returns None when the typed line
+    IS the standard line (nothing to test — that pick is
+    already on the board) or isn't a positive number."""
+    try:
+        new_line = float(line)
+    except (TypeError, ValueError):
+        return None
+    if new_line <= 0 or new_line == float(pick.line):
+        return None
+    prices: dict[tuple, tuple[int, str]] = {}
+    for row in alt_prices or []:
+        if row.player != pick.player or row.prop != pick.prop:
+            continue
+        k = (row.side, float(row.line))
+        if k not in prices or row.odds > prices[k][0]:
+            prices[k] = (int(row.odds), row.bookmaker or "")
+    learn_kwargs = (
+        {
+            "learning_delta": learning["delta"],
+            "learning_tag": learning["tag"],
+            "learning_note": learning["note"],
+        }
+        if learning
+        else {}
+    )
+    proj = _projection.project_stat(form_values) if form_values else None
+    other_side = "Under" if pick.side == "Over" else "Over"
+    return _drop_option_for_line(
+        pick, new_line, abs(new_line - float(pick.line)), prices, other_side,
+        form_values=form_values, proj=proj,
+        learn_kwargs=learn_kwargs, learning=learning,
+    )

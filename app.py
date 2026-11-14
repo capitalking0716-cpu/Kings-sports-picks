@@ -10,7 +10,7 @@ import io
 import json
 import re
 from dataclasses import asdict
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 try:
     from zoneinfo import ZoneInfo
@@ -21,7 +21,7 @@ except Exception:  # pragma: no cover — zoneinfo is stdlib on supported Python
 
 import streamlit as st
 
-from kings_picks import breakdown, game_logs, king_style, learning, lilly, picks_export, players, profiles, projection, roster, self_test, slate_store, slip, stats_pack
+from kings_picks import breakdown, game_logs, king_style, learning, lilly, picks_export, players, profiles, projection, roster, self_test, slate_store, slip, special_picks, stats_pack
 from kings_picks.ledger import Ledger
 from kings_picks.model import SCORING_VERSION, decimal_to_american, score_prop
 from kings_picks.odds_api import OddsApiClient, market_key_for_label
@@ -261,6 +261,54 @@ LEARNING = learning.LearningEngine(
 )
 SLIP_BOOK = slip.SlipBook(f"{DATA_DIR}/slips.json")
 SLATE_STORE = slate_store.SlateStore(f"{DATA_DIR}/current_slate.json")
+# One stored slate per GAME DATE (pick-the-date, 2026-11-14):
+# pulling a future day's games stores that day's slate
+# without touching today's, and the date picker re-renders
+# any stored day with zero Odds API calls.
+DATED_SLATE_STORE = slate_store.DatedSlateStore(f"{DATA_DIR}/slates")
+
+
+# ---------- game dates ----------
+# The app speaks in Detroit days: the date picker offers
+# today and the next 7 days, and every slate belongs to
+# exactly one of them.
+
+def _today_detroit() -> date:
+    return (datetime.now(_DETROIT) if _DETROIT else datetime.now()).date()
+
+
+def _today_iso() -> str:
+    return _today_detroit().isoformat()
+
+
+def _date_options() -> list[str]:
+    today = _today_detroit()
+    return [(today + timedelta(days=i)).isoformat() for i in range(8)]
+
+
+def _date_label(iso: str) -> str:
+    """'2026-11-16' -> 'Mon, Nov 16' — with 'Today —' /
+    'Tomorrow —' in front when it is one of those."""
+    try:
+        day = date.fromisoformat(iso)
+    except (TypeError, ValueError):
+        return str(iso)
+    base = f"{day.strftime('%a, %b')} {day.day}"
+    today = _today_detroit()
+    if day == today:
+        return f"Today — {base}"
+    if day == today + timedelta(days=1):
+        return f"Tomorrow — {base}"
+    return base
+
+
+def _selected_date_iso() -> str:
+    """The date picker's current day, always one of the
+    offered options (a stale or foreign value falls back
+    to today rather than pointing the app at a day it
+    can't name)."""
+    chosen = st.session_state.get("game_date") or ""
+    return chosen if chosen in _date_options() else _today_iso()
 
 
 def get_client() -> OddsApiClient:
@@ -273,22 +321,47 @@ def get_client() -> OddsApiClient:
 SETUP_NOTE = "Add your Odds API key in Streamlit Secrets to pull live props."
 
 
-def load_props(force_refresh: bool = False):
+def load_props(force_refresh: bool = False, game_date: str | None = None):
     """Live props, or an honest empty result.
 
-    Returns (props, mode, note) with mode "live", "no_key"
-    or "failed". No key -> no props and the setup note. A
-    failed fetch -> no props and the failure note. Lilly
-    never falls back to invented/sample data.
+    Returns (props, mode, note) with mode "live", "no_key",
+    "failed" or "no_games". No key -> no props and the
+    setup note. A failed fetch -> no props and the failure
+    note. Lilly never falls back to invented/sample data.
+
+    game_date pulls ONE day's games (pick-the-date): for
+    today (or no date) the pull is the one it has always
+    been; for a future day the client fetches only that
+    day's games (commence-time filtered, per-date cache).
+    A future day with no posted lines is its own honest
+    answer — "no_games" — not a failure.
     """
     client = get_client()
     if not client.has_key:
         return [], "no_key", f"No Odds API key set. {SETUP_NOTE}"
-    result = client.fetch_props("NBA", force_refresh=force_refresh)
-    props = list(result.props)
-    nfl = client.fetch_props("NFL", force_refresh=force_refresh)
-    props.extend(nfl.props)
+    dated = bool(game_date) and game_date != _today_iso()
+    if dated:
+        result = client.fetch_props(
+            "NBA", force_refresh=force_refresh, game_date=game_date
+        )
+        props = list(result.props)
+        nfl = client.fetch_props(
+            "NFL", force_refresh=force_refresh, game_date=game_date
+        )
+        props.extend(nfl.props)
+    else:
+        result = client.fetch_props("NBA", force_refresh=force_refresh)
+        props = list(result.props)
+        nfl = client.fetch_props("NFL", force_refresh=force_refresh)
+        props.extend(nfl.props)
     if not props:
+        if dated and result.ok and nfl.ok:
+            day = slate_store.format_game_date(game_date) or game_date
+            return [], "no_games", (
+                f"No games with lines posted for {day} yet — the books "
+                "usually post lines a day or two ahead. Try a nearer "
+                "day, or pull this day again when it's closer."
+            )
         message = result.message if not result.ok else nfl.message
         return [], "failed", (
             f"LIVE DATA FAILED: {message} "
@@ -451,6 +524,283 @@ def score_all(props, form_lookup=None, learning_lookup=None):
     return sorted(best.values(), key=lambda x: x.probability, reverse=True)
 
 
+def _grade_sentence(pick, line, values) -> str:
+    """The form grade for ONE line of one pick, in plain
+    words: the verdict (STRONG / LEAN / SHAKY / MIXED /
+    NO DATA) with the hit count spelled out — "hit this
+    line in 9 of his last 10 games". `values` is the same
+    raw game-log list the board's scoring consumed (or
+    None, which grades NO DATA, honestly). One grader for
+    every drop surface, so a line reads the same grade
+    everywhere it appears."""
+    grade = self_test.grade_values(
+        pick.player, pick.prop, pick.side, float(line), values
+    )
+    if grade.verdict == self_test.NO_DATA:
+        return "🧪 Form: ❔ No grade — no game log covers this pick."
+    push_note = ""
+    if grade.last10_pushes:
+        plural = "es" if grade.last10_pushes != 1 else ""
+        push_note = (
+            f" ({grade.last10_pushes} game{plural} landed exactly on "
+            "the line — a push, counted neither way)"
+        )
+    return (
+        f"🧪 Form: {grade.verdict_display} — hit this line in "
+        f"{grade.last10_hits} of his last {grade.last10_games} "
+        f"games{push_note}."
+    )
+
+
+def _props_browser_groups(raw_props):
+    """The pulled props grouped for browsing (Props page):
+    games in tip-off order; inside a game, players; inside
+    a player, one entry per stat + side holding every
+    distinct line the books posted for it.
+
+    The rows ARE the pull: each raw prop is a real standard
+    line at a real price from bet365 or BetMGM — the parser
+    keeps the best real price per line and records which
+    book posted it. Nothing here is averaged, blended or
+    estimated; Lilly's chances live on her board, not in
+    the browser."""
+    games: dict[str, dict] = {}
+    for prop in raw_props or []:
+        game = games.setdefault(
+            prop.event or "Game time TBD",
+            {"commence": prop.commence_time or "", "players": {}},
+        )
+        player = game["players"].setdefault(prop.player, {})
+        lines = player.setdefault((prop.prop, prop.side), {})
+        lines.setdefault(float(prop.line), prop)
+    return sorted(
+        games.items(), key=lambda kv: (kv[1]["commence"] or "9999", kv[0])
+    )
+
+
+def _render_prop_drop_stepper(pick, active_profile):
+    """📉 Drop it down — the step-by-step dropper on one
+    browsed prop (Props page props browser, 2026-11-14).
+
+    Neko's words: "show me her pick's actual player props
+    and then allow me to drop them down as needed." One tap
+    opens the dropper — and only then are the alternate
+    lines fetched, the same on-tap discipline as the My
+    Slip expander (one request, disk-cached after). Each
+    "Drop it down" tap lowers the line one step; every step
+    shows the new line, the book's REAL price at that line
+    and the book offering it (when a book offers it),
+    Lilly's chance, and the form grade AT THAT LINE from
+    the last-10 logs. A priced step goes straight onto his
+    test slip at the dropped line — the slip, the log and
+    the download all carry the dropped line, never the
+    standard one it came from."""
+    open_key = f"browse_open_{active_profile}_{pick.key}"
+    toggle_key = f"browse-drop-btn-{active_profile}-{pick.key}"
+    if not st.session_state.get(open_key):
+        if st.button(
+            f"📉 Drop it down — his real line is {pick.line:g}",
+            key=toggle_key,
+        ):
+            st.session_state[open_key] = True
+            st.rerun()
+        return
+    if st.button("📉 Done dropping", key=toggle_key):
+        st.session_state[open_key] = False
+        st.rerun()
+        return
+
+    mode = st.session_state["mode"]
+    market_key = market_key_for_label(pick.prop)
+    alt_prices = []
+    if market_key is None:
+        st.info(
+            "No alternate market exists for this prop, so there are "
+            "no dropped lines to price for it."
+        )
+    else:
+        client = get_client()
+        event_id = getattr(pick, "event_id", "") or client.resolve_event_id(
+            pick.sport, pick.event, getattr(pick, "commence_time", "") or ""
+        )
+        result = client.fetch_alternates(pick.sport, event_id or "", market_key)
+        if not result.ok:
+            st.info(result.message)
+        else:
+            note = result.message
+            if result.requests_remaining and not result.from_cache:
+                note += f" | {result.requests_remaining}"
+            st.caption(note)
+            alt_prices = result.prices
+    form_lookup = _form_lookup_for(mode)
+    values = form_lookup(pick) if form_lookup is not None else None
+    learning_lookup = _learning_lookup_for(mode)
+    learned = (
+        learning_lookup(pick.sport, pick.prop, pick.side)
+        if learning_lookup is not None
+        else None
+    )
+    options = slip.build_drop_options(
+        pick, alt_prices, form_values=values, learning=learned
+    )
+    if not options:
+        st.info("This line has no lower ladder to drop down.")
+        return
+    step_key = f"browse_step_{active_profile}_{pick.key}"
+    step = max(0, min(int(st.session_state.get(step_key, 0)), len(options)))
+    st.markdown(
+        f"**His real line is {pick.line:g}** — tap **📉 Drop it down** "
+        "to lower it one step at a time. Every step shows the book's "
+        "real price at that line and Lilly's form grade for it."
+    )
+    if step == 0:
+        st.markdown(
+            f"<div class='pick-card'>"
+            f"<b style='font-size:18px'>{pick.player} — {pick.prop} "
+            f"{pick.side} {pick.line:g}</b> (his real line)<br>"
+            f"Odds: {pick.odds:+d} at {pick.bookmaker or 'the book'} "
+            f"&nbsp;|&nbsp; Lilly's chance: <b>{pick.probability:.0%}</b><br>"
+            f"{_grade_sentence(pick, pick.line, values)}"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        option = options[step - 1]
+        if option.playable:
+            st.markdown(
+                f"<div class='pick-card'>"
+                f"<b style='font-size:18px'>{pick.player} — {pick.prop} "
+                f"{option.label}</b><br>"
+                f"Odds: {option.odds:+d} at {option.bookmaker or 'the book'} "
+                f"&nbsp;|&nbsp; Lilly's chance: <b>{option.probability:.0%}</b> "
+                f"(his real line {option.base_line:g}: "
+                f"{option.standard_probability:.0%})<br>"
+                f"{_grade_sentence(pick, option.line, values)}"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+        elif option.probability is not None:
+            st.markdown(
+                f"**{pick.player} — {pick.prop} {option.label}** — Lilly's "
+                f"chance: **{option.probability:.0%}** (his real line "
+                f"{option.base_line:g}: {option.standard_probability:.0%})"
+                f"<br><i>{option.note}</i>"
+                f"<br>{_grade_sentence(pick, option.line, values)}",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                f"**{pick.player} — {pick.prop} {option.label}**"
+                f"<br><i>{option.note}</i>"
+                f"<br>{_grade_sentence(pick, option.line, values)}",
+                unsafe_allow_html=True,
+            )
+    if step < len(options):
+        if st.button(
+            "📉 Drop it down",
+            key=f"browse-down-{active_profile}-{pick.key}",
+        ):
+            st.session_state[step_key] = step + 1
+            st.rerun()
+    if step > 0:
+        if st.button(
+            "⬆️ Back up one step",
+            key=f"browse-up-{active_profile}-{pick.key}",
+        ):
+            st.session_state[step_key] = step - 1
+            st.rerun()
+        option = options[step - 1]
+        if option.playable:
+            leg = option.to_leg()
+            if leg is not None and leg.key in SLIP_BOOK.keys(active_profile):
+                st.caption("✅ On your slip — see it on the 🎟️ My Slip page")
+            elif leg is not None and leg.family in SLIP_BOOK.families(active_profile):
+                st.caption(
+                    "Another version of this pick is on your slip — "
+                    "remove it from the slip on the 🎟️ My Slip page "
+                    "to switch versions."
+                )
+            elif leg is not None and st.button(
+                "➕ Add this dropped line to my slip",
+                key=f"browse-add-{active_profile}-{pick.key}-{option.line:g}",
+            ):
+                SLIP_BOOK.add(active_profile, leg)
+                st.session_state["slip_flash"] = (
+                    f"Added to your slip: {leg.label}. Open the "
+                    "🎟️ My Slip page to see Lilly grade the whole slip."
+                )
+                st.rerun()
+    st.caption(
+        f"Step {step} of {len(options)} down from his real line "
+        f"({pick.line:g})."
+    )
+
+
+def _render_props_browser(active_profile):
+    """🎯 His actual props — the pulled slate browsed game
+    by game (Props page, 2026-11-14).
+
+    Neko's words: "Her to show me her pick's actual player
+    props and then allow me to drop them down as needed."
+    Every row is a prop Lilly actually pulled, at the real
+    standard line and real price, with the book that posted
+    it named — a prop only one book carries says that book,
+    because the book is printed on every row. Pick a game,
+    find the player, drop his line down, add it to the
+    slip. Built from the stored slate: browsing costs zero
+    quota; only opening a dropper fetches that pick's
+    alternate lines, on tap."""
+    raw_props = st.session_state.get("raw_props") or []
+    if not raw_props:
+        return
+    st.markdown("---")
+    st.subheader("🎯 His actual props — drop them down")
+    games_day = slate_store.format_game_date(
+        st.session_state.get("slate_date") or ""
+    )
+    day_text = f" for **{games_day}**" if games_day else ""
+    st.write(
+        f"Every prop Lilly actually pulled from bet365 and BetMGM{day_text} "
+        "— the real lines at the real prices, with the book that posted "
+        "each one named on its row. Pick a game, find your player, then "
+        "drop his line down and add it to your slip."
+    )
+    groups = _props_browser_groups(raw_props)
+    game_labels = [label for label, _data in groups]
+    chosen_game = st.selectbox("Pick a game", game_labels, key="browse_game")
+    game = dict(groups).get(chosen_game) or groups[0][1]
+    scored_by_key = {
+        (p.player, p.sport, p.prop, p.side, float(p.line)): p
+        for p in st.session_state.get("scored", [])
+    }
+    for player in sorted(game["players"]):
+        st.markdown(f"#### {player}")
+        stats = game["players"][player]
+        for prop_label, side in sorted(
+            stats, key=lambda k: (k[0], 0 if k[1] == "Over" else 1)
+        ):
+            for line in sorted(stats[(prop_label, side)]):
+                raw = stats[(prop_label, side)][line]
+                st.markdown(
+                    f"**{prop_label} — {side} {line:g}** · "
+                    f"{raw.odds:+d} at **{raw.bookmaker or 'the book'}**"
+                )
+                anchor = scored_by_key.get(
+                    (raw.player, raw.sport, raw.prop, raw.side, float(raw.line))
+                )
+                if anchor is None:
+                    st.caption(
+                        "Lilly didn't put this one on her board, so "
+                        "there's no drop control for it."
+                    )
+                elif slip.drop_steps_for(anchor.prop):
+                    _render_prop_drop_stepper(anchor, active_profile)
+                else:
+                    st.caption(
+                        "A yes-or-no pick — there's no line to drop down."
+                    )
+
+
 def _render_drop_options(pick, active_profile):
     """The dropped-lines expander for one My Slip board row.
 
@@ -529,7 +879,8 @@ def _render_drop_options(pick, active_profile):
                 f"<b style='font-size:18px'>{pick.player} — {pick.prop} {option.label}</b><br>"
                 f"Odds: {option.odds:+d} &nbsp;|&nbsp; Lilly's chance: "
                 f"<b>{option.probability:.0%}</b> (standard {option.base_line:g}: "
-                f"{option.standard_probability:.0%}) &nbsp;|&nbsp; {option.bookmaker}"
+                f"{option.standard_probability:.0%}) &nbsp;|&nbsp; {option.bookmaker}<br>"
+                f"{_grade_sentence(pick, option.line, values)}"
                 f"</div>",
                 unsafe_allow_html=True,
             )
@@ -551,15 +902,93 @@ def _render_drop_options(pick, active_profile):
                 f"**{pick.player} — {pick.prop} {option.label}** — Lilly's "
                 f"chance: **{option.probability:.0%}** (standard "
                 f"{option.base_line:g}: {option.standard_probability:.0%})"
-                f"<br><i>{option.note}</i>",
+                f"<br><i>{option.note}</i>"
+                f"<br>{_grade_sentence(pick, option.line, values)}",
                 unsafe_allow_html=True,
             )
         else:
             st.markdown(
                 f"**{pick.player} — {pick.prop} {option.label}**"
-                f"<br><i>{option.note}</i>",
+                f"<br><i>{option.note}</i>"
+                f"<br>{_grade_sentence(pick, option.line, values)}",
                 unsafe_allow_html=True,
             )
+
+    # ----- ✍️ Type your own line and test it -----
+    # Test My Picks (2026-11-14): the step table offers the
+    # standard drops, but his own line may be none of them.
+    # A typed line is graded from the same game logs and
+    # scored through the same path (kings_picks/slip.py
+    # custom_line_option) — and joins the slip only when a
+    # book prices that exact line, like every other drop.
+    st.markdown("---")
+    st.markdown("**✍️ Or type your own line and test it**")
+    st.caption(
+        "Type any line for this pick and Lilly grades it against "
+        "his last 10 games and shows her chance at it. If a book "
+        "prices that exact line, you can add it to your slip — "
+        "if not, the grade is yours to read, but the line can't "
+        "go on the slip."
+    )
+    typed = st.number_input(
+        f"Your line — {pick.player}, {pick.prop} {pick.side}",
+        min_value=0.5,
+        step=0.5,
+        value=None,
+        placeholder=f"Standard line is {pick.line:g}",
+        key=f"slip-custom-line-{active_profile}-{pick.key}",
+    )
+    if typed is not None:
+        custom = slip.custom_line_option(
+            pick, alt_prices, float(typed),
+            form_values=values, learning=learned,
+        )
+        if custom is None:
+            st.info(
+                "That is the standard line itself — the pick at the "
+                "top of this board row is already that bet. Type a "
+                "different line to test it."
+            )
+        else:
+            grade = self_test.grade_values(
+                pick.player, pick.prop, pick.side, custom.line, values
+            )
+            if grade.verdict == self_test.NO_DATA:
+                st.markdown(
+                    f"🧪 **Your line {custom.line:g}** — ❔ **No grade**: "
+                    "no game log covers this pick, so Lilly can't grade "
+                    "that line's form."
+                )
+            else:
+                st.markdown(
+                    f"🧪 **Your line {custom.line:g}** — "
+                    f"{grade.verdict_display}: hit this line in "
+                    f"**{grade.last10_hits} of his last "
+                    f"{grade.last10_games} games**."
+                )
+            if custom.probability is not None:
+                st.markdown(
+                    f"Lilly's chance at {custom.line:g}: "
+                    f"**{custom.probability:.0%}** (standard "
+                    f"{pick.line:g}: {pick.probability:.0%})."
+                )
+            if custom.playable:
+                custom_leg = custom.to_leg()
+                if custom_leg is not None and custom_leg.key in SLIP_BOOK.keys(active_profile):
+                    st.caption("✅ On your slip")
+                elif custom_leg is not None and custom_leg.family in SLIP_BOOK.families(active_profile):
+                    st.caption(
+                        "Another version of this pick is on your slip — "
+                        "remove it from the slip above to switch versions."
+                    )
+                elif custom_leg is not None and st.button(
+                    "➕ Add this line to slip",
+                    key=f"slip-custom-add-{active_profile}-{pick.key}-{custom.line:g}",
+                ):
+                    SLIP_BOOK.add(active_profile, custom_leg)
+                    st.rerun()
+            else:
+                st.info(custom.note)
 
 
 def _ticket_number(seed_text: str) -> str:
@@ -611,11 +1040,26 @@ def render_parlay(parlay, mode: str):
     (The why/verdict prose still lives on the Props page,
     where he goes to dig in.)
     """
+    _style = getattr(parlay, "style", "standard")
     style_tag = (
         "👑 KING'S STYLE"
-        if getattr(parlay, "style", "standard") == "king"
+        if _style == "king"
+        else "⭐ SPECIAL PICKS"
+        if _style == "special"
         else "STANDARD LINES"
     )
+    # A slate for a future day is a PRE-BUILD (pick-the-date,
+    # 2026-11-14): the ticket says so, with its game day, so
+    # an early look is never mistaken for game-day lines.
+    slate_date = st.session_state.get("slate_date") or ""
+    prebuilt_html = ""
+    if slate_date and slate_date > _today_iso():
+        games_day = slate_store.format_game_date(slate_date)
+        if games_day:
+            prebuilt_html = (
+                f"<div class='ticket-sub'>🔮 PRE-BUILT · Games for "
+                f"{games_day} — early look, lines can change</div>"
+            )
     pulled = slate_store.format_pulled_at(st.session_state.get("pulled_at", ""))
     pulled_line = f"Pulled {pulled}" if pulled else "Pulled this session"
     number = _ticket_number(
@@ -666,6 +1110,7 @@ def render_parlay(parlay, mode: str):
         f"{parlay.overall_probability:.1%} of the time</div>"
         f"<div class='ticket-sub'>Ticket #{number} &nbsp;·&nbsp; {pulled_line}</div>"
         f"<div class='ticket-sub'>{style_tag} &nbsp;·&nbsp; Model {SCORING_VERSION}</div>"
+        f"{prebuilt_html}"
         f"<div class='ticket-perf'></div>"
         f"{legs_html}"
         f"<div class='ticket-perf'></div>"
@@ -742,6 +1187,76 @@ def _render_slip_ticket(legs, summary, profile):
     )
 
 
+def _grade_slip_legs(legs):
+    """Grade every leg of a hand-built slip against its
+    last-10 game-log form (Test My Picks, 2026-11-14) and
+    stamp the grade on the leg, the way the pull stamps
+    Lilly's own legs — the slip ticket's 🧪 line, the
+    form-check block and the plain-English download all
+    read the stamp. Returns [(leg, grade), ...] in slip
+    order. Zero Odds API quota: the logs are the ones the
+    app already loads. Fail-soft — no logs means every
+    grade reads NO DATA, never a crash."""
+    logs_by_sport = _self_test_logs()
+    graded = []
+    for leg in legs:
+        grade = self_test.grade_pick(
+            leg.player,
+            leg.prop,
+            leg.side,
+            leg.line,
+            logs_by_sport.get(leg.sport),
+        )
+        leg.form_verdict = grade.verdict
+        leg.form_record = grade.form_label
+        graded.append((leg, grade))
+    return graded
+
+
+def _render_slip_form_check(graded, summary):
+    """🧪 Test my picks — the form check on YOUR slip.
+
+    Neko's order (2026-11-14): "test my picks as well."
+    Every leg he built is graded from the player's last-10
+    game logs and read back in plain words with the hit
+    count, and the slip's TRUE combined chance — Lilly's
+    per-leg chances multiplied together — is said out loud
+    the same way her own tickets say it."""
+    st.subheader("🧪 Test my picks — Lilly grades your slip")
+    st.write(
+        "Every leg checked against the player's own last 10 games: "
+        "how often would this exact pick have hit? A strong grade "
+        "means his recent form backs the pick — it is still never "
+        "a promise about the next game."
+    )
+    for leg, grade in graded:
+        if grade.verdict == self_test.NO_DATA:
+            st.markdown(
+                f"**{leg.label}** — {grade.verdict_display}: no game log "
+                "covers this pick, so there is no form grade — it rests "
+                "on the book's price alone."
+            )
+            continue
+        push_note = ""
+        if grade.last10_pushes:
+            plural = "es" if grade.last10_pushes != 1 else ""
+            push_note = (
+                f" ({grade.last10_pushes} game{plural} landed exactly "
+                "on the line — a push, counted neither way)"
+            )
+        st.markdown(
+            f"**{leg.label}** — {grade.verdict_display}: hit this line "
+            f"in **{grade.last10_hits} of his last {grade.last10_games} "
+            f"games**{push_note}."
+        )
+    st.markdown(
+        "**True overall chance for the whole slip: "
+        f"{picks_export.chance_words(summary['overall_probability'])}** "
+        "— Lilly's chance for each leg, multiplied together. Every "
+        "leg has to hit, or the slip loses."
+    )
+
+
 def _picks_download_teams() -> dict:
     """{sport: {name key: team text}} for the plain-English
     download's player (Team) labels — from the same loaded
@@ -755,14 +1270,130 @@ def _picks_download_teams() -> dict:
     }
 
 
+def _render_special_picks_section():
+    """⭐ SPECIAL PICKS — the anytime-TD set (2026-11-14).
+
+    Neko's order: on a day with 6 or more NFL games, a
+    special button lights up; tapping it builds, for EVERY
+    game on the day's slate, a 2-pick parlay of anytime
+    TDs — the steadiest TD scorer from EACH team (the man
+    known for getting his one TD: ranked by his
+    games-with-a-TD rate, never by raw TD totals; injury
+    tags excluded first). Built from the stored slate and
+    the game logs the app already holds — zero Odds API
+    calls. Below 6 NFL games the button sits greyed out,
+    with the rule written under it in plain words."""
+    games = special_picks.nfl_game_count(
+        st.session_state.get("raw_props") or []
+    )
+    lit = games >= special_picks.MIN_NFL_GAMES
+    slate_date = st.session_state.get("slate_date") or ""
+    if lit:
+        # Lit up: the app's black / purple / gold, loud and
+        # gold-ringed — he can't miss that today qualifies.
+        st.markdown(
+            "<style>"
+            ".st-key-special_picks_btn button {"
+            "background: linear-gradient(135deg, #2a1052 0%, #7b2fbe 55%, #b8860b 130%);"
+            "color: #ffd700; border: 2px solid #ffd700;"
+            "font-weight: 800; font-size: 1.05rem;"
+            "box-shadow: 0 0 14px rgba(255, 215, 0, 0.45);"
+            "}"
+            ".st-key-special_picks_btn button:hover {"
+            "color: #ffffff; border-color: #ffd700;"
+            "}"
+            "</style>",
+            unsafe_allow_html=True,
+        )
+    if st.button(
+        "⭐ SPECIAL PICKS — a 2-pick anytime TD for every game",
+        key="special_picks_btn",
+        disabled=not lit,
+        help=(
+            "Builds one 2-pick parlay per game: the steadiest "
+            "TD scorer from each team."
+        ),
+    ):
+        nfl_logs = _self_test_logs().get("NFL")
+        # Injury designations: the app has no injury feed
+        # today, so the mapping is honestly empty — the
+        # builder's exclusion is real (and tested), and no
+        # player is ever flagged on invented data.
+        built = special_picks.build_special_set(
+            st.session_state.get("raw_props") or [],
+            st.session_state.get("scored") or [],
+            nfl_logs,
+            injuries={},
+        )
+        st.session_state["special_parlays"] = built.parlays
+        st.session_state["special_notes"] = built.notes
+        st.session_state["special_form"] = built.form_lines
+        st.session_state["special_date"] = slate_date
+        st.rerun()
+    games_word = "game" if games == 1 else "games"
+    st.caption(
+        "Lights up on days with 6 or more NFL games. "
+        f"This day's slate has {games} NFL {games_word}."
+    )
+    parlays = st.session_state.get("special_parlays") or []
+    if not parlays or not slate_date:
+        return
+    if st.session_state.get("special_date") != slate_date:
+        # A set built for another day never shows as this
+        # day's — switch back to its day and it's there.
+        return
+    games_day = slate_store.format_game_date(slate_date)
+    st.subheader(f"⭐ Special picks — {games_day}")
+    st.write(
+        "One 2-pick for every game: the steadiest TD scorer from "
+        "EACH team — the man known for getting his one touchdown, "
+        "picked by how often he scores, not by a couple of big "
+        "games. Any player carrying an injury tag is never used."
+    )
+    form_lines = st.session_state.get("special_form") or {}
+    for parlay in parlays:
+        st.markdown(f"**{parlay.label}**")
+        render_parlay(parlay, st.session_state.get("mode", "live"))
+        for leg in parlay.picks:
+            line = form_lines.get(leg.key)
+            if line:
+                st.markdown(f"- **{leg.player}** — {line}")
+        st.markdown(
+            "Together: "
+            f"**{picks_export.chance_words(parlay.overall_probability)}** "
+            "— both men have to score."
+        )
+        st.markdown("---")
+    for note in st.session_state.get("special_notes") or []:
+        st.caption(f"ℹ️ {note}")
+    if st.button(
+        "💾 Save the special picks to my record", key="special_save"
+    ):
+        added = PICK_LOG.record_run(
+            parlays, mode="live", created_at=now_stamp()
+        )
+        if added:
+            st.success(
+                f"Saved — {len(added)} new leg(s) on your record, tagged "
+                "⭐ special. Settle them on Results / Ledger after the games."
+            )
+        else:
+            st.info(
+                "Every leg of this set is already on your record from "
+                "the pull — nothing new to save."
+            )
+
+
 def _render_picks_download():
-    """⬇️ Download my picks (plain English) — the current
-    stored slate as one text file for Neko's phone
-    (kings_picks/picks_export.py). Built from the slate the
-    app already holds: no new pull, no rescore, zero quota,
-    and the same for both profiles — the picks are shared.
-    With no slate yet, a short note stands where the button
-    would be — never an empty file."""
+    """⬇️ Download my picks (plain English) — the selected
+    date's stored slate as one text file for Neko's phone
+    (kings_picks/picks_export.py), with his own tested
+    My Slip picks riding in it too. Built from what the
+    app already holds: no new pull, no rescore, zero quota.
+    The tickets are the same for both profiles — the picks
+    are shared; the slip section is the signed-in
+    profile's own. With nothing to download, a short note
+    stands where the button would be — never an empty file."""
     no_slate_note = (
         "📥 Once Lilly has built your picks, a button appears here "
         "to download the whole pull as a plain-English file you "
@@ -770,7 +1401,18 @@ def _render_picks_download():
     )
     parlays = st.session_state.get("parlays", [])
     king_parlays = st.session_state.get("king_parlays", [])
-    if not parlays and not king_parlays:
+    own_legs = SLIP_BOOK.legs(active_profile)
+    if own_legs:
+        # Stamp each leg's form grade so the file's
+        # own-picks section reads with its marks.
+        _grade_slip_legs(own_legs)
+    slate_date = st.session_state.get("slate_date") or ""
+    special = []
+    if slate_date and st.session_state.get("special_date") == slate_date:
+        # The ⭐ special TD set rides in the file too — but
+        # only the set built for the day being downloaded.
+        special = st.session_state.get("special_parlays") or []
+    if not parlays and not king_parlays and not own_legs and not special:
         st.caption(no_slate_note)
         return
     text = picks_export.build_picks_text(
@@ -778,13 +1420,19 @@ def _render_picks_download():
         parlays=parlays,
         king_parlays=king_parlays,
         teams=_picks_download_teams(),
+        game_date=slate_date,
+        today=_today_iso(),
+        slip_legs=own_legs,
+        slip_profile=profiles.PROFILE_LABELS[active_profile],
+        special_parlays=special,
     )
     if not text:
         st.caption(no_slate_note)
         return
     pulled_at = st.session_state.get("pulled_at", "")
     date_part = (
-        pulled_at[:10] if pulled_at else datetime.now().date().isoformat()
+        slate_date
+        or (pulled_at[:10] if pulled_at else datetime.now().date().isoformat())
     )
     st.download_button(
         "⬇️ Download my picks (plain English)",
@@ -909,10 +1557,16 @@ st.sidebar.markdown(
 # ---- Shared state: the stored slate ----
 # A pull PERSISTS (kings_picks/slate_store.py): the slate —
 # board, Lilly's parlays and the 👑 King parlays, the picks
-# exactly as pulled — is saved to data/current_slate.json,
-# and a fresh app load renders the STORED slate with no
-# Odds API call and no rescore. It stays until Neko pulls
-# fresh odds; only a pull replaces it.
+# exactly as pulled — is saved per game date to
+# data/slates/<date>.json (and, for today, mirrored to
+# data/current_slate.json as it always was). A fresh app
+# load renders the STORED slate with no Odds API call and
+# no rescore. It stays until Neko pulls fresh odds for that
+# date; only a pull for that date replaces that date's
+# slate. session_state["slate_date"] always names the game
+# day of the slate on screen; session_state["game_date"]
+# is the date picker's day, and the two move together
+# whenever the picker is touched.
 def _apply_stored_slate(payload) -> bool:
     """Put a stored slate into session state for rendering.
     False (nothing changed) when there is no usable slate."""
@@ -930,6 +1584,64 @@ def _apply_stored_slate(payload) -> bool:
     return True
 
 
+def _clear_slate_state(mode: str = "empty") -> None:
+    """An honest empty screen for a date with no stored
+    slate: no picks, no board, no borrowed slate from
+    another day shown as if it were this day's."""
+    st.session_state["parlays"] = []
+    st.session_state["king_parlays"] = []
+    st.session_state["king_info"] = {}
+    st.session_state["scored"] = []
+    st.session_state["raw_props"] = []
+    st.session_state["mode"] = mode
+    st.session_state["note"] = ""
+    st.session_state["pulled_at"] = ""
+
+
+def _apply_slate_for_date(date_iso: str) -> bool:
+    """Show the stored slate for ONE game date — the date
+    picker's whole job. Reads the per-date store first;
+    the single legacy store answers only when its slate
+    actually belongs to that date (or can't be dated at
+    all). No stored slate for the date -> an honest empty
+    state for that date. ZERO Odds API calls either way:
+    switching dates is a render, never a pull."""
+    payload = DATED_SLATE_STORE.load(date_iso)
+    if payload is None:
+        legacy = SLATE_STORE.load()
+        if legacy is not None and slate_store.payload_game_date(legacy) in (
+            "",
+            date_iso,
+        ):
+            payload = legacy
+    if payload is not None and _apply_stored_slate(payload):
+        st.session_state["slate_date"] = (
+            slate_store.payload_game_date(payload) or date_iso
+        )
+        return True
+    _clear_slate_state()
+    st.session_state["slate_date"] = date_iso
+    return False
+
+
+def _apply_initial_slate() -> None:
+    """First run of a fresh session: today's dated slate
+    when one is stored; else the single stored slate,
+    exactly as the app has always opened. No fetch, no
+    scoring — the store IS the slate until the next pull."""
+    today = _today_iso()
+    payload = DATED_SLATE_STORE.load(today)
+    if payload is not None and _apply_stored_slate(payload):
+        st.session_state["slate_date"] = today
+        return
+    legacy = SLATE_STORE.load()
+    if legacy is not None and _apply_stored_slate(legacy):
+        derived = slate_store.payload_game_date(legacy)
+        st.session_state["slate_date"] = derived
+        if derived in _date_options():
+            st.session_state["game_date"] = derived
+
+
 if "parlays" not in st.session_state:
     st.session_state["parlays"] = []
     st.session_state["mode"] = "no_key"
@@ -941,12 +1653,26 @@ if "scored" not in st.session_state:
     st.session_state["scored"] = []
 if "raw_props" not in st.session_state:
     st.session_state["raw_props"] = []
+if "game_date" not in st.session_state:
+    st.session_state["game_date"] = _today_iso()
+if "slate_date" not in st.session_state:
+    st.session_state["slate_date"] = ""
+if "special_parlays" not in st.session_state:
+    # The ⭐ special TD set built for one slate date
+    # (kings_picks/special_picks.py) — session-only, rebuilt
+    # on tap from the stored slate; special_date names the
+    # slate it was built from, and a fresh pull for that
+    # date clears it (the new slate may tell another story).
+    st.session_state["special_parlays"] = []
+    st.session_state["special_notes"] = []
+    st.session_state["special_form"] = {}
+    st.session_state["special_date"] = ""
 if "pulled_at" not in st.session_state:
     # First run of a fresh session: render the stored slate,
     # if one was ever pulled. No fetch, no scoring — the
     # store IS the slate until the next pull.
     st.session_state["pulled_at"] = ""
-    _apply_stored_slate(SLATE_STORE.load())
+    _apply_initial_slate()
 
 
 def _grade_scored_legs(scored) -> dict:
@@ -1055,14 +1781,25 @@ def _apply_roster_guard(props):
     return kept, ""
 
 
-def run_algorithm(force_refresh: bool = False):
-    props, mode, note = load_props(force_refresh=force_refresh)
+def run_algorithm(force_refresh: bool = False, game_date: str | None = None):
+    game_date = game_date or _selected_date_iso()
+    props, mode, note = load_props(force_refresh=force_refresh, game_date=game_date)
+    if mode == "no_games":
+        # The picked day simply has no posted lines yet.
+        # Nothing is stored, nothing is recorded, and no
+        # other day's slate is touched — the screen shows
+        # this day, honestly empty, with the reason.
+        _clear_slate_state(mode="no_games")
+        st.session_state["note"] = note
+        st.session_state["slate_date"] = game_date
+        return [], mode, note
     if mode != "live":
         # No key, or the live fetch failed: Lilly never
-        # invents picks. A stored slate, if one exists, stays
-        # on screen exactly as pulled — this pull replaces
-        # nothing, records nothing, stores nothing.
-        if _apply_stored_slate(SLATE_STORE.load()):
+        # invents picks. The picked date's stored slate, if
+        # one exists, stays on screen exactly as pulled —
+        # this pull replaces nothing, records nothing,
+        # stores nothing.
+        if _apply_slate_for_date(game_date):
             st.session_state["note"] += (
                 f" | ⚠️ That pull didn't come back live — {note} "
                 "Your stored slate above is still the one showing, "
@@ -1077,6 +1814,7 @@ def run_algorithm(force_refresh: bool = False):
         st.session_state["mode"] = mode
         st.session_state["note"] = note
         st.session_state["pulled_at"] = ""
+        st.session_state["slate_date"] = game_date
         return [], mode, note
 
     form_lookup = _form_lookup_for(mode)
@@ -1156,21 +1894,65 @@ def run_algorithm(force_refresh: bool = False):
         )
 
     # Persist the pulled slate (board + both parlay sets,
-    # exactly as rendered) — later loads render THIS, with
-    # no API call and no rescore, until the next pull.
-    SLATE_STORE.save(
-        slate_store.build_payload(
-            pulled_at=pulled_at,
-            note=st.session_state["note"],
-            raw_props=props,
-            scored=scored,
-            parlays=parlays,
-            king_parlays=king_parlays,
-            king_info=king_info,
-        )
+    # exactly as rendered) under its GAME DATE — later loads
+    # and date switches render THIS, with no API call and
+    # no rescore, until the next pull for that date. Today's
+    # slate is also mirrored to the single store, as before.
+    payload = slate_store.build_payload(
+        pulled_at=pulled_at,
+        note=st.session_state["note"],
+        raw_props=props,
+        scored=scored,
+        parlays=parlays,
+        king_parlays=king_parlays,
+        king_info=king_info,
+        game_date=game_date,
     )
+    DATED_SLATE_STORE.save(game_date, payload)
+    if game_date == _today_iso():
+        SLATE_STORE.save(payload)
     st.session_state["pulled_at"] = pulled_at
+    st.session_state["slate_date"] = game_date
+    if st.session_state.get("special_date") == game_date:
+        # This pull just replaced the slate the special set
+        # was built from — the set is stale, clear it.
+        st.session_state["special_parlays"] = []
+        st.session_state["special_notes"] = []
+        st.session_state["special_form"] = {}
+        st.session_state["special_date"] = ""
     return parlays, mode, note
+
+
+# ================= DATE PICKER =================
+# Neko's order (2026-11-14): "I also want that ability to
+# pick the dates and pre build pick" — one picker, shared
+# by the Dashboard and My Slip through session state.
+# Picking a day re-renders that day's stored slate (zero
+# API calls); the day's games are fetched only when he
+# taps a pull button for that day.
+
+def _render_date_picker(widget_key: str) -> str:
+    """The game-date picker: today through 7 days ahead,
+    named in plain words. Returns the picked date (ISO)."""
+    options = _date_options()
+    current = _selected_date_iso()
+    chosen = st.selectbox(
+        "📅 Games for which day?",
+        options,
+        index=options.index(current),
+        format_func=_date_label,
+        key=widget_key,
+        help=(
+            "Pick a day to see its games. Days you already pulled "
+            "show their stored picks — no new pull, no quota used. "
+            "Pull a future day to build its picks ahead of time."
+        ),
+    )
+    if chosen != st.session_state.get("game_date"):
+        st.session_state["game_date"] = chosen
+        _apply_slate_for_date(chosen)
+        st.rerun()
+    return st.session_state["game_date"]
 
 
 # ================= GAME-DAY HEADER =================
@@ -1218,18 +2000,36 @@ def _gameday_games():
 
 def _render_gameday_header():
     """The sportsbook game-day banner at the top of the
-    Dashboard: today's date, tonight's games with start
-    times, the countdown to the first lock, the stored-slate
-    stamp, and the Odds API quota when the last pull's note
-    reported it."""
+    Dashboard: the slate's date, its games with start
+    times, the countdown to the first lock (today's slate
+    only), the stored-slate stamp, and the Odds API quota
+    when the last pull's note reported it. A future date's
+    slate is titled by its own day and flagged as the
+    pre-build it is."""
     now = datetime.now(_DETROIT) if _DETROIT else datetime.now()
-    lines = [
-        "<div class='gd-title'>🏟️ GAME DAY — "
-        f"{now.strftime('%A, %B')} {now.day}, {now.year}</div>"
-    ]
+    slate_date = st.session_state.get("slate_date") or ""
+    today_iso = _today_iso()
+    games_day = slate_store.format_game_date(slate_date) if slate_date else ""
+    if slate_date and slate_date != today_iso and games_day:
+        lines = [f"<div class='gd-title'>🗓️ GAMES FOR — {games_day}</div>"]
+        if slate_date > today_iso:
+            lines.append(
+                "<div class='gd-line'>🔮 <b>Pre-built</b> — an early look. "
+                "Lines and who's playing can change by game day.</div>"
+            )
+    else:
+        lines = [
+            "<div class='gd-title'>🏟️ GAME DAY — "
+            f"{now.strftime('%A, %B')} {now.day}, {now.year}</div>"
+        ]
     games = _gameday_games()
     if games:
-        lines.append("<div class='gd-sec'>TONIGHT'S GAMES</div>")
+        section = (
+            "TONIGHT'S GAMES"
+            if not slate_date or slate_date <= today_iso
+            else "THE GAMES"
+        )
+        lines.append(f"<div class='gd-sec'>{section}</div>")
         for game in games:
             when = (
                 game["starts"].strftime("%-I:%M %p ET")
@@ -1240,20 +2040,24 @@ def _render_gameday_header():
                 f"<div class='gd-game'>{game['sport']} · "
                 f"{html.escape(game['event'])} — {when}</div>"
             )
-        future = [g["starts"] for g in games if g["starts"] and g["starts"] > now]
-        if future:
-            total_minutes = int((future[0] - now).total_seconds() // 60)
-            hours, minutes = divmod(total_minutes, 60)
-            clock = f"{hours}h {minutes:02d}m" if hours else f"{minutes}m"
-            lines.append(
-                f"<div class='gd-lock'>⏰ First lock in {clock} — "
-                f"{future[0].strftime('%-I:%M %p ET')}</div>"
-            )
-        elif any(g["starts"] for g in games):
-            lines.append(
-                "<div class='gd-lock'>🔴 First lock has passed — "
-                "games are underway or done.</div>"
-            )
+        # The lock countdown is about TODAY's games; a
+        # future slate's first tip is days away and the
+        # banner already names its day.
+        if not slate_date or slate_date <= today_iso:
+            future = [g["starts"] for g in games if g["starts"] and g["starts"] > now]
+            if future:
+                total_minutes = int((future[0] - now).total_seconds() // 60)
+                hours, minutes = divmod(total_minutes, 60)
+                clock = f"{hours}h {minutes:02d}m" if hours else f"{minutes}m"
+                lines.append(
+                    f"<div class='gd-lock'>⏰ First lock in {clock} — "
+                    f"{future[0].strftime('%-I:%M %p ET')}</div>"
+                )
+            elif any(g["starts"] for g in games):
+                lines.append(
+                    "<div class='gd-lock'>🔴 First lock has passed — "
+                    "games are underway or done.</div>"
+                )
     pulled_at = st.session_state.get("pulled_at", "")
     if pulled_at:
         when = slate_store.format_pulled_at(pulled_at)
@@ -1276,7 +2080,14 @@ def _render_gameday_header():
 # ================= DASHBOARD =================
 if page == "Dashboard":
     st.title("👑 Kings Sports Books Picks")
-    st.subheader("Today's parlays — built by Lilly")
+    _picked_date = _render_date_picker("date_pick_dash")
+    if _picked_date == _today_iso():
+        st.subheader("Today's parlays — built by Lilly")
+    else:
+        st.subheader(
+            f"Parlays for {_date_label(_picked_date)} — "
+            "pre-built by Lilly ahead of time"
+        )
     _render_gameday_header()
     _pack_stamp = stats_pack.load_pack()[2]
     if _pack_stamp:
@@ -1297,32 +2108,62 @@ if page == "Dashboard":
     if pulled_at:
         pulled_when = slate_store.format_pulled_at(pulled_at)
         pulled_text = f" — pulled {pulled_when}" if pulled_when else ""
+        games_day = slate_store.format_game_date(
+            st.session_state.get("slate_date") or ""
+        )
+        games_text = f" Games for **{games_day}**." if games_day else ""
         st.caption(
-            f"📌 **Stored slate{pulled_text}.** These picks are saved in "
+            f"📌 **Stored slate{pulled_text}.**{games_text} These picks are saved in "
             "the app: they stay exactly as pulled until you tap "
             "**🔄 Pull fresh odds**, and only a fresh pull replaces them."
         )
     if st.session_state["note"]:
         st.write(st.session_state["note"])
 
-    if st.button("▶ Run the algorithm — build today's parlays"):
+    _run_label = (
+        "▶ Run the algorithm — build today's parlays"
+        if _picked_date == _today_iso()
+        else f"▶ Run the algorithm — pre-build {_date_label(_picked_date)}'s parlays"
+    )
+    if st.button(_run_label):
         with st.spinner("Lilly is building your parlays..."):
-            run_algorithm(force_refresh=False)
+            run_algorithm(force_refresh=False, game_date=_picked_date)
         st.success("Done. Parlays saved to the ledger.")
 
     if st.button("🔄 Pull fresh odds (uses API quota — tap only when you want fresh lines)"):
         with st.spinner("Fetching fresh live props..."):
-            run_algorithm(force_refresh=True)
+            run_algorithm(force_refresh=True, game_date=_picked_date)
         st.success("Refreshed.")
 
+    # ⭐ Special picks: greyed out under 6 NFL games, lit at
+    # 6+, and the built set renders as its own section.
+    _render_special_picks_section()
+
     if not st.session_state["parlays"]:
-        st.markdown(
-            "<div class='warn-box'>No parlays built yet. Tap <b>Run the algorithm</b> above "
-            "to pull today's live props. The pull is stored — the picks stay on this "
-            "screen until you pull fresh odds.</div>",
-            unsafe_allow_html=True,
-        )
+        if st.session_state.get("mode") == "no_games":
+            st.markdown(
+                "<div class='warn-box'>No games with lines posted for "
+                f"<b>{_date_label(_picked_date)}</b> yet — the books usually "
+                "post lines a day or two ahead. Pick a nearer day above, or "
+                "pull this day again when it's closer.</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                "<div class='warn-box'>No parlays built yet for "
+                f"<b>{_date_label(_picked_date)}</b>. Tap <b>Run the algorithm</b> above "
+                "to pull that day's live props. The pull is stored — the picks stay on this "
+                "screen until you pull fresh odds for that day.</div>",
+                unsafe_allow_html=True,
+            )
     else:
+        if (st.session_state.get("slate_date") or "") > _today_iso():
+            st.info(
+                "🔮 **Pre-built — an early look.** These picks were built "
+                "ahead of game day from the lines posted so far. Lines and "
+                "who's playing can change by game day — pull again on the "
+                "day for the final word."
+            )
         # 👑 King's style leads: Neko's dropped-line rebuild
         # of the same parlays, priced from the books' real
         # alternate markets on the live pull that built them.
@@ -1339,7 +2180,13 @@ if page == "Dashboard":
             for king_parlay in king_parlays:
                 render_parlay(king_parlay, st.session_state["mode"])
                 st.markdown("---")
-        st.subheader("🎟️ Tonight's Slate — Lilly's standard lines")
+        if (st.session_state.get("slate_date") or "") == _today_iso():
+            st.subheader("🎟️ Tonight's Slate — Lilly's standard lines")
+        else:
+            st.subheader(
+                "🎟️ The slate — Lilly's standard lines "
+                f"({_date_label(st.session_state.get('slate_date') or _picked_date)})"
+            )
         for parlay in st.session_state["parlays"]:
             render_parlay(parlay, st.session_state["mode"])
             st.markdown("---")
@@ -1488,6 +2335,14 @@ elif page == "Props":
                 unsafe_allow_html=True,
             )
 
+        # ----- 🎯 His actual props: browse the pull, drop lines down -----
+        # Last on the page, under its own date picker: pick a
+        # day, browse that day's real pulled props game by
+        # game, drop a line down, add it to the slip.
+        st.markdown("---")
+        _render_date_picker("date_pick_props")
+        _render_props_browser(active_profile)
+
 # ================= MY SLIP =================
 elif page == "🎟️ My Slip":
     st.title("🎟️ My Slip — build your own picks")
@@ -1503,6 +2358,11 @@ elif page == "🎟️ My Slip":
     flash = st.session_state.pop("slip_flash", None)
     if flash:
         st.success(flash)
+    # The board below is the picked day's board: switch
+    # days here and the board, the drop options and the
+    # download all follow — from the stored slates, with
+    # no new pull.
+    _slip_date = _render_date_picker("date_pick_slip")
 
     # ----- Your slip so far (this profile's own slip) -----
     st.subheader(f"🧾 {profiles.PROFILE_LABELS[active_profile]}'s slip")
@@ -1532,9 +2392,15 @@ elif page == "🎟️ My Slip":
             key=stake_key,
         )
         summary = slip.slip_summary(my_legs, float(stake))
+        # Test my picks: Lilly grades every leg of the
+        # slip from its last-10 game logs BEFORE the ticket
+        # prints, so the ticket's own 🧪 lines carry the
+        # grades, and the plain-words check follows it.
+        graded_legs = _grade_slip_legs(my_legs)
         # The slip itself, printed as a bet ticket — every
         # number the old metrics showed is in its footer.
         _render_slip_ticket(my_legs, summary, active_profile)
+        _render_slip_form_check(graded_legs, summary)
         for leg in my_legs:
             if st.button(
                 f"❌ Remove — {leg.label}",
@@ -1562,19 +2428,27 @@ elif page == "🎟️ My Slip":
             st.session_state["slip_flash"] = note
             st.rerun()
 
-    # ----- Today's board: the same props the Props page shows -----
+    # ----- The picked day's board: the same props the Props page shows -----
     st.markdown("---")
-    st.subheader("📋 Today's board")
+    if _slip_date == _today_iso():
+        st.subheader("📋 Today's board")
+    else:
+        st.subheader(f"📋 Board for {_date_label(_slip_date)}")
     scored = st.session_state["scored"]
     if not scored:
         st.write(
-            "No board loaded yet. Loading it uses the same cached slate "
-            "fetch as the Dashboard — no extra quota beyond that fetch, "
-            "and none at all while the cache is warm."
+            "No board loaded for this day yet. Loading it pulls that "
+            "day's odds once and stores them — switching days after "
+            "that costs no quota at all."
         )
-        if st.button("📥 Load today's board"):
-            with st.spinner("Loading today's board..."):
-                run_algorithm(force_refresh=False)
+        load_label = (
+            "📥 Load today's board"
+            if _slip_date == _today_iso()
+            else f"📥 Load the board for {_date_label(_slip_date)}"
+        )
+        if st.button(load_label):
+            with st.spinner("Loading the board..."):
+                run_algorithm(force_refresh=False, game_date=_slip_date)
             st.rerun()
     else:
         if st.session_state["note"]:

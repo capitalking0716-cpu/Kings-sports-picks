@@ -42,6 +42,7 @@ import math
 import re
 
 from kings_picks import slate_store
+from kings_picks import slip as _slip
 from kings_picks.game_logs import normalize_name
 from kings_picks.roster import NBA_TEAMS, NFL_TEAMS, resolve_team
 
@@ -229,7 +230,11 @@ def _leg_lines(pick, index: int, teams) -> list[str]:
 def _ticket_lines(parlay, teams) -> list[str]:
     style = getattr(parlay, "style", "standard") or "standard"
     style_words = (
-        "King's style — dropped lines" if style == "king" else "standard lines"
+        "King's style — dropped lines"
+        if style == "king"
+        else "special pick — anytime TD pair"
+        if style == "special"
+        else "standard lines"
     )
     count = len(parlay.picks)
     lines = [
@@ -244,7 +249,18 @@ def _ticket_lines(parlay, teams) -> list[str]:
     return lines
 
 
-def build_picks_text(*, pulled_at: str = "", parlays=(), king_parlays=(), teams=None) -> str:
+def build_picks_text(
+    *,
+    pulled_at: str = "",
+    parlays=(),
+    king_parlays=(),
+    teams=None,
+    game_date: str = "",
+    today: str = "",
+    slip_legs=(),
+    slip_profile: str = "",
+    special_parlays=(),
+) -> str:
     """The whole download: the pull's time, then every ticket
     — 👑 King's style first, as the Dashboard shows them,
     then Lilly's standard lines.
@@ -253,10 +269,21 @@ def build_picks_text(*, pulled_at: str = "", parlays=(), king_parlays=(), teams=
     the stored slate or straight from a pull); teams is the
     loaded logs' {sport: {name key: team text}} maps, used
     only to name each player's team. Returns "" when there
-    are no parlays at all — no slate, no file."""
+    are no parlays at all — no slate, no file.
+
+    game_date names the day the slate's games are played
+    ("Games for: Sunday, November 16, 2026"); when it is
+    still ahead of `today`, the tickets are a pre-build and
+    the file says so in one plain line. slip_legs are the
+    user's own hand-built, form-tested picks (My Slip):
+    they ride at the end, under their own heading, with
+    the slip's true combined chance — the same legs the
+    app grades on the My Slip page."""
     standard = list(parlays or [])
     king = list(king_parlays or [])
-    if not standard and not king:
+    own = list(slip_legs or [])
+    special = list(special_parlays or [])
+    if not standard and not king and not own and not special:
         return ""
     out = [
         "👑 KINGS SPORTS BOOKS PICKS",
@@ -265,6 +292,14 @@ def build_picks_text(*, pulled_at: str = "", parlays=(), king_parlays=(), teams=
     ]
     pulled = slate_store.format_pulled_at(pulled_at)
     out.append(f"Pulled: {pulled}" if pulled else "Pulled: this session")
+    games_day = slate_store.format_game_date(game_date)
+    if games_day:
+        out.append(f"Games for: {games_day}")
+        if today and game_date > today:
+            out.append(
+                "🔮 Pre-built — an early look at that day's games. "
+                "Lines and who's playing can change by game day."
+            )
     out += [
         "",
         "How to read this file: each ticket is a parlay — a bundle of",
@@ -282,11 +317,42 @@ def build_picks_text(*, pulled_at: str = "", parlays=(), king_parlays=(), teams=
         out.append("")
         for parlay in king:
             out.extend(_ticket_lines(parlay, teams))
+    if special:
+        out.append("⭐ SPECIAL PICKS — ONE ANYTIME TD FROM EACH TEAM")
+        out.append(
+            "The steadiest TD scorer from each team — the man known "
+            "for getting his one touchdown — paired game by game."
+        )
+        out.append("")
+        for parlay in special:
+            out.extend(_ticket_lines(parlay, teams))
     if standard:
         out.append("🎟️ LILLY'S STANDARD-LINE TICKETS")
         out.append("")
         for parlay in standard:
             out.extend(_ticket_lines(parlay, teams))
+    if own:
+        heading = "🧪 YOUR OWN PICKS — built by you, tested by Lilly"
+        if slip_profile:
+            heading += f" ({slip_profile}'s slip)"
+        out.append(heading)
+        out.append(
+            "Your hand-built picks from My Slip, each one graded "
+            "against the player's last 10 games."
+        )
+        out.append("")
+        for index, leg in enumerate(own, 1):
+            out.extend(_leg_lines(leg, index, teams))
+        out.append(
+            "Overall chance if played together: "
+            f"{chance_words(_slip.overall_probability(own))} — "
+            "Lilly's chance for each pick, multiplied together."
+        )
+        out.append(
+            "Save the slip in the app to keep these picks in your "
+            "record and settle them after the games."
+        )
+        out.append("")
     out += [
         _RULE,
         "These are the picks exactly as pulled at the time above.",

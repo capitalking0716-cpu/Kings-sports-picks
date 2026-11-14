@@ -46,6 +46,7 @@ crash), same persistence style as SlipBook / PickLog.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import fields as _dataclass_fields
 from datetime import datetime
 from pathlib import Path
@@ -150,16 +151,23 @@ def build_payload(
     parlays,
     king_parlays,
     king_info=None,
+    game_date: str = "",
 ) -> dict:
     """The stored-slate payload for one pull — everything
     the Dashboard, Props page and My Slip board need to
     re-render the pulled slate exactly, with no API call
     and no rescore. `pulled_at` is the pull's ISO timestamp;
     it is also the stamp the pull's pick-log entries carry,
-    so the stored slate and the log tell the same time."""
+    so the stored slate and the log tell the same time.
+    `game_date` is the calendar day (America/Detroit,
+    YYYY-MM-DD) the slate's GAMES are played on — the day
+    the user picked for the pull (2026-11-14: pick the
+    date, pre-build ahead). Payloads written before game
+    dates existed simply carry ""."""
     return {
         "version": 2,
         "pulled_at": pulled_at,
+        "game_date": game_date,
         "note": note,
         "king_info": dict(king_info or {}),
         "props": [prop_to_dict(p) for p in raw_props or []],
@@ -198,6 +206,7 @@ def restore_slate(payload) -> dict | None:
     return {
         "note": str(payload.get("note") or ""),
         "pulled_at": str(payload.get("pulled_at") or ""),
+        "game_date": payload_game_date(payload),
         "king_info": king_info if isinstance(king_info, dict) else {},
         "raw_props": _props("props", scored=False),
         "scored": _props("scored", scored=True),
@@ -220,6 +229,75 @@ def format_pulled_at(iso: str) -> str:
     if moment.tzinfo is not None and _DETROIT is not None:
         moment = moment.astimezone(_DETROIT)
     return moment.strftime("%a %b %d, %Y · %I:%M %p ET")
+
+
+# ---------- game dates (pick-the-date, 2026-11-14) ----------
+
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def is_date_string(value) -> bool:
+    """True for a real YYYY-MM-DD calendar date — the only
+    shape a slate's game date (and a per-date filename) is
+    ever allowed to take."""
+    if not isinstance(value, str) or not _DATE_RE.match(value):
+        return False
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        return False
+    return True
+
+
+def format_game_date(iso_date: str) -> str:
+    """'2026-11-16' -> 'Monday, November 16, 2026' — the
+    plain way a slate's game day is named everywhere (the
+    Dashboard banner, the tickets, the download). "" for
+    anything that isn't a date."""
+    if not is_date_string(iso_date):
+        return ""
+    moment = datetime.strptime(iso_date, "%Y-%m-%d")
+    return f"{moment.strftime('%A, %B')} {moment.day}, {moment.year}"
+
+
+def _detroit_date_of(iso_value) -> str:
+    """The America/Detroit calendar date (YYYY-MM-DD) of an
+    ISO timestamp, or "" when it can't be read."""
+    try:
+        moment = datetime.fromisoformat(str(iso_value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return ""
+    if moment.tzinfo is not None and _DETROIT is not None:
+        moment = moment.astimezone(_DETROIT)
+    return moment.date().isoformat()
+
+
+def payload_game_date(payload) -> str:
+    """Which game day a stored payload belongs to.
+
+    The payload's own game_date when the pull recorded one.
+    Older payloads (written before game dates existed) are
+    dated by their games instead: the Detroit date of the
+    earliest commence time among the stored raw props,
+    falling back to the pull's own Detroit date. "" when
+    nothing about the payload says — callers treat that as
+    "the day it has always been shown for", never a guess
+    presented as fact."""
+    if not isinstance(payload, dict):
+        return ""
+    recorded = payload.get("game_date")
+    if is_date_string(recorded):
+        return recorded
+    commences = sorted(
+        str(row.get("commence_time"))
+        for row in payload.get("props") or []
+        if isinstance(row, dict) and row.get("commence_time")
+    )
+    for commence in commences:
+        day = _detroit_date_of(commence)
+        if day:
+            return day
+    return _detroit_date_of(payload.get("pulled_at"))
 
 
 # ---------- the store ----------
@@ -268,3 +346,81 @@ class SlateStore:
             self.path.unlink(missing_ok=True)
         except Exception:
             pass
+
+
+class DatedSlateStore:
+    """One stored slate PER GAME DATE (2026-11-14: pick the
+    date, pre-build the picks).
+
+    data/slates/<YYYY-MM-DD>.json — the same build_payload
+    dict SlateStore holds, one file per game day. Pulling
+    Sunday's games writes Sunday's file and leaves today's
+    untouched; switching the app's date picker to a day with
+    a stored slate re-renders it with ZERO Odds API calls,
+    exactly like the single store, just keyed by date.
+
+    The single SlateStore (data/current_slate.json) still
+    exists as today's mirror — older flows and older
+    payloads keep working — but this book is the source the
+    date picker reads. Same tolerance rules: a missing or
+    corrupt file is "no slate for that date", never a
+    crash, and a leftover demo payload is purged on sight.
+    """
+
+    def __init__(self, directory: Path | str = "data/slates"):
+        self.dir = Path(directory)
+        self.dir.mkdir(parents=True, exist_ok=True)
+
+    def _path(self, date_iso: str) -> Path | None:
+        if not is_date_string(date_iso):
+            return None
+        return self.dir / f"{date_iso}.json"
+
+    def save(self, date_iso: str, payload: dict) -> bool:
+        """Store one date's slate. False (nothing written)
+        for a date string that isn't a real YYYY-MM-DD day —
+        a date is a filename here, so nothing else is ever
+        allowed to become one."""
+        path = self._path(date_iso)
+        if path is None:
+            return False
+        path.write_text(json.dumps(payload, indent=2))
+        return True
+
+    def load(self, date_iso: str) -> dict | None:
+        """One date's stored payload, or None — same rules
+        as SlateStore.load, including the demo purge."""
+        path = self._path(date_iso)
+        if path is None or not path.exists():
+            return None
+        try:
+            raw = json.loads(path.read_text())
+        except Exception:
+            return None
+        if not isinstance(raw, dict):
+            return None
+        if raw.get("mode") == "demo":
+            self.clear(date_iso)
+            return None
+        return raw
+
+    def exists(self, date_iso: str) -> bool:
+        return self.load(date_iso) is not None
+
+    def clear(self, date_iso: str) -> None:
+        path = self._path(date_iso)
+        if path is None:
+            return
+        try:
+            path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    def dates(self) -> list[str]:
+        """Every game date with a stored slate, earliest
+        first — for showing which days are already pulled."""
+        if not self.dir.exists():
+            return []
+        return sorted(
+            path.stem for path in self.dir.glob("*.json") if is_date_string(path.stem)
+        )
