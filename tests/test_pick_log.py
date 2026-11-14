@@ -332,7 +332,7 @@ def test_app_results_page_shows_pick_log_and_exports():
     at = _login_as_king(_run_app(FAKE_SECRETS))
     radios = list(at.radio)
     assert radios, "app page radio missing after login"
-    radios[0].set_value("Results / Ledger").run()
+    radios[0].set_value("My Record").run()
     assert not at.exception, f"app raised: {at.exception}"
     text = "\n".join(
         [m.value for m in at.markdown]

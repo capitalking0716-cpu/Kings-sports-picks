@@ -23,11 +23,12 @@ What this module is:
   file Lilly hands over reads the same way. Pure builder:
   no file IO, no Odds API call, nothing rescored — it only
   reads the ledger entries it is handed.
-- Honest limits: the stored ledger does not record which
-  sportsbook priced each leg (the book lives on the live
-  pull's props and is not persisted), so the file names no
-  book rather than inventing one. Empty record -> b"" —
-  no tickets, no file — and the app says so where the
+- Honest limits: new records (from 2026-11-14) persist the
+  sportsbook that priced each leg, and a leg's line in the
+  file names its book when the record carries one. Records
+  saved before then never stored the book, so their legs
+  name none — the file never invents one. Empty record ->
+  b"" — no tickets, no file — and the app says so where the
   button would be.
 """
 
@@ -103,13 +104,14 @@ def _log_blocks(parlays, profile_label: str) -> list[tuple[str, str]]:
         for index, pick in enumerate(parlay.picks, 1):
             result = _RESULT_WORDS.get(pick["result"], "Still open")
             blocks.append(("leg", f"{index}. {pick['label']}"))
-            blocks.append(
-                (
-                    "detail",
-                    f"Price: {int(pick['odds']):+d} · Lilly's chance: "
-                    f"{pick['probability']:.0%} · Result: {result}",
-                )
+            detail = (
+                f"Price: {int(pick['odds']):+d} · Lilly's chance: "
+                f"{pick['probability']:.0%} · Result: {result}"
             )
+            book = pick.get("bookmaker") or ""
+            if book:
+                detail += f" · Book: {book}"
+            blocks.append(("detail", detail))
         blocks.append(("blank", ""))
     blocks += [
         ("rule", ""),

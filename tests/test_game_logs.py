@@ -399,7 +399,7 @@ def test_app_props_page_shows_board_and_breakdown_after_live_run():
     at.session_state["raw_props"] = raw
     at.session_state["parlays"] = []
     at.session_state["mode"] = "live"
-    list(at.radio)[0].set_value("Props").run()
+    list(at.radio)[0].set_value("Games & Props").run()
     assert not at.exception, f"app raised: {at.exception}"
     subheads = [s.value for s in at.subheader]
     assert any("board at a glance" in s for s in subheads)
@@ -429,7 +429,7 @@ def test_app_props_breakdown_shows_recent_form_when_feed_matched():
     at.session_state["nfl_logs"] = GameLogs(
         sport="NFL", by_player=game_logs.parse_nflverse_csv(NFL_CSV),
         source_label=game_logs.NFL_SOURCE, season_label="2026")
-    list(at.radio)[0].set_value("Props").run()
+    list(at.radio)[0].set_value("Games & Props").run()
     assert not at.exception, f"app raised: {at.exception}"
     all_text = "\n".join(
         [m.value for m in at.markdown]

@@ -362,7 +362,7 @@ def test_app_my_slip_page_builds_and_saves_a_slip(monkeypatch):
     at.session_state["stats_store"] = _FakeStore()
     radios = list(at.radio)
     assert radios, "app page radio missing after login"
-    radios[0].set_value("🎟️ My Slip").run()
+    radios[0].set_value("My Slip").run()
     assert not at.exception, f"app raised: {at.exception}"
     text = "\n".join(
         [m.value for m in at.markdown]

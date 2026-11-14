@@ -31,25 +31,88 @@ from kings_picks.pick_log import PickLog, entry_stamp, now_stamp
 st.set_page_config(
     page_title="Kings Sports Books Picks",
     page_icon="👑",
-    layout="wide",
-    initial_sidebar_state="expanded",
+    layout="centered",
+    initial_sidebar_state="collapsed",
 )
 
-# ---- Black / purple / gold theme, phone-first ----
+# ---- One design system: black / purple / gold, phone-first ----
+# A sportsbook's structure (top bar, tab nav, matchup cards,
+# odds buttons) in Neko's colours — never bet365 green.
+# Every surface in the app draws from this single block.
 st.markdown(
     """
     <style>
     .stApp { background-color: #0b0b12; color: #f5f0ff; }
     section[data-testid="stSidebar"] { background-color: #14091f; }
     h1, h2, h3 { color: #d4af37 !important; }
-    .stButton > button {
+    /* Buttons: one style everywhere — purple, gold ring, big tap target. */
+    .stButton > button, .stDownloadButton > button {
         background-color: #7b2fbe !important; color: white !important;
-        font-size: 20px !important; font-weight: bold !important;
-        border-radius: 14px !important; min-height: 56px !important;
+        font-size: 18px !important; font-weight: bold !important;
+        border-radius: 14px !important; min-height: 52px !important;
         border: 2px solid #d4af37 !important; width: 100%;
     }
-    .stButton > button:hover { background-color: #9b4fd8 !important; }
+    .stButton > button:hover, .stDownloadButton > button:hover {
+        background-color: #9b4fd8 !important;
+    }
+    .stButton > button:disabled {
+        background-color: #241536 !important; color: #8f83a8 !important;
+        border-color: #4a3a63 !important;
+    }
     div[data-testid="stMetricValue"] { color: #d4af37; }
+    div[data-testid="stMetric"] {
+        background-color: #1c1026; border: 1px solid #7b2fbe;
+        border-radius: 12px; padding: 10px 12px;
+    }
+    hr { border-color: #3a2456 !important; }
+    /* Top bar: brand + profile chip. */
+    .topbar {
+        background: linear-gradient(135deg, #14091f, #2a1152);
+        border: 2px solid #d4af37; border-radius: 14px;
+        padding: 14px 18px 10px; margin-bottom: 8px; text-align: center;
+    }
+    .topbar .brand {
+        color: #d4af37; font-size: 27px; font-weight: 800;
+        letter-spacing: 1px; line-height: 1.15;
+    }
+    .topbar .tag { color: #e8dcff; font-size: 14px; margin-top: 3px; }
+    .profile-chip {
+        display: inline-block; background-color: #1c1026;
+        border: 1px solid #d4af37; color: #f5f0ff;
+        border-radius: 999px; padding: 7px 16px;
+        font-size: 16px; font-weight: 700; margin: 4px 0;
+    }
+    /* Nav: the page radio dressed as sportsbook tabs. */
+    div[class*="st-key-nav_page"] div[role="radiogroup"] {
+        flex-direction: row !important; flex-wrap: wrap; gap: 8px;
+    }
+    div[class*="st-key-nav_page"] div[role="radiogroup"] label {
+        background-color: #1c1026; border: 1px solid #7b2fbe;
+        border-radius: 999px; padding: 9px 16px; margin: 0;
+        font-weight: 700;
+    }
+    div[class*="st-key-nav_page"] div[role="radiogroup"] label:has(input:checked) {
+        background-color: #7b2fbe; border-color: #d4af37; color: #ffffff;
+    }
+    div[class*="st-key-nav_page"] div[role="radiogroup"] label > div:first-of-type {
+        display: none;
+    }
+    /* Matchup cards + odds buttons (Dashboard games board,
+       Games & Props game selector). */
+    .game-card {
+        background-color: #1c1026; border: 1px solid #7b2fbe;
+        border-left: 5px solid #d4af37; border-radius: 12px;
+        padding: 10px 14px; margin: 12px 0 6px;
+    }
+    .game-card .gc-event { font-size: 18px; font-weight: 700; color: #ffffff; }
+    .game-card .gc-meta { color: #cbb8ef; font-size: 13px; margin-top: 2px; }
+    div[class*="st-key-board_"] > button,
+    div[class*="st-key-gamepick_"] > button {
+        background-color: #241536 !important; font-size: 16px !important;
+        min-height: 48px !important; border: 1px solid #d4af37 !important;
+        text-align: left !important;
+    }
+    div[class*="st-key-gamepick_"] > button { text-align: center !important; }
     .live-banner {
         background-color: #12351f; border: 2px solid #2ecc71;
         color: #b6f5cd; padding: 14px; border-radius: 12px;
@@ -79,6 +142,12 @@ st.markdown(
         background-color: #1c1026; border: 1px solid #7b2fbe;
         border-radius: 12px; padding: 12px; margin-bottom: 10px;
     }
+    .slip-card {
+        background-color: #1c1026; border: 2px solid #d4af37;
+        border-radius: 12px; padding: 14px 16px; margin-bottom: 10px;
+        font-size: 16px;
+    }
+    .slip-card .sc-head { color: #d4af37; font-weight: 800; font-size: 17px; }
     .bet-ticket {
         background-color: #f6f1e3; color: #1a1426;
         border: 2px solid #d4af37; border-radius: 10px;
@@ -713,11 +782,11 @@ def _render_prop_drop_stepper(pick, active_profile):
         if option.playable:
             leg = option.to_leg()
             if leg is not None and leg.key in SLIP_BOOK.keys(active_profile):
-                st.caption("✅ On your slip — see it on the 🎟️ My Slip page")
+                st.caption("✅ On your slip — see it on the My Slip page")
             elif leg is not None and leg.family in SLIP_BOOK.families(active_profile):
                 st.caption(
                     "Another version of this pick is on your slip — "
-                    "remove it from the slip on the 🎟️ My Slip page "
+                    "remove it from the slip on the My Slip page "
                     "to switch versions."
                 )
             elif leg is not None and st.button(
@@ -727,7 +796,7 @@ def _render_prop_drop_stepper(pick, active_profile):
                 SLIP_BOOK.add(active_profile, leg)
                 st.session_state["slip_flash"] = (
                     f"Added to your slip: {leg.label}. Open the "
-                    "🎟️ My Slip page to see Lilly grade the whole slip."
+                    "My Slip page to see Lilly grade the whole slip."
                 )
                 st.rerun()
     st.caption(
@@ -753,7 +822,6 @@ def _render_props_browser(active_profile):
     raw_props = st.session_state.get("raw_props") or []
     if not raw_props:
         return
-    st.markdown("---")
     st.subheader("🎯 His actual props — drop them down")
     games_day = slate_store.format_game_date(
         st.session_state.get("slate_date") or ""
@@ -767,7 +835,24 @@ def _render_props_browser(active_profile):
     )
     groups = _props_browser_groups(raw_props)
     game_labels = [label for label, _data in groups]
-    chosen_game = st.selectbox("Pick a game", game_labels, key="browse_game")
+    # The game selector is a row of matchup cards (buttons):
+    # tap a game to open its props. The Dashboard games
+    # board lands here with a game already chosen.
+    chosen_game = st.session_state.get("browse_game")
+    if chosen_game not in game_labels:
+        chosen_game = game_labels[0]
+    for idx, (label, data) in enumerate(groups):
+        starts = _parse_commence(data.get("commence"))
+        when = (
+            starts.strftime("%-I:%M %p ET") if starts else "start time not listed"
+        )
+        marker = "▸ " if label == chosen_game else ""
+        st.button(
+            f"{marker}{label} — {when}",
+            key=f"gamepick_{idx}",
+            on_click=_open_game_props,
+            args=(label,),
+        )
     game = dict(groups).get(chosen_game) or groups[0][1]
     scored_by_key = {
         (p.player, p.sport, p.prop, p.side, float(p.line)): p
@@ -1375,7 +1460,7 @@ def _render_special_picks_section():
         if added:
             st.success(
                 f"Saved — {len(added)} new leg(s) on your record, tagged "
-                "⭐ special. Settle them on Results / Ledger after the games."
+                "⭐ special. Settle them on My Record after the games."
             )
         else:
             st.info(
@@ -1551,28 +1636,72 @@ def render_self_test():
             )
 
 
-# ---- Sidebar ----
-st.sidebar.title("👑 Kings Picks")
-st.sidebar.markdown("**Neko's own picks platform.** Paper tracking only — no real bets, no money moved.")
-st.sidebar.markdown(f"### Signed in as {profiles.PROFILE_LABELS[active_profile]}")
-if st.session_state.get("via_cookie"):
-    st.sidebar.markdown(
-        "📱 **This phone remembers you** — no PIN needed on this phone. "
-        "Log out and this phone forgets you."
-    )
-if st.sidebar.button("Log out / switch profile", key="logout"):
-    _forget_this_phone()
-    st.session_state.pop("active_profile", None)
-    st.session_state.pop("pending_profile", None)
-    st.session_state.pop("via_cookie", None)
-    st.rerun()
-page = st.sidebar.radio(
-    "Go to",
-    ["Dashboard", "Props", "🎟️ My Slip", "Players", "💜 Lilly", "Results / Ledger", "Setup"],
-    index=0,
+# ---- Top bar + sportsbook tab navigation ----
+# The sidebar is gone (2026-11-14 rework): the app opens
+# like a sportsbook — a brand bar with the signed-in
+# profile chip on top, and the pages as one row of tabs
+# under it. One nav, in the open, phone-first.
+PAGES = [
+    "Dashboard",
+    "Games & Props",
+    "Players",
+    "My Slip",
+    "My Record",
+    "💜 Lilly",
+    "⚙️ Setup",
+]
+
+
+def _go_to(page_name: str) -> None:
+    """Tab switch for buttons (an on_click callback, so the
+    nav widget's state is set before the rerun — never
+    after the widget has rendered)."""
+    if page_name in PAGES:
+        st.session_state["nav_page"] = page_name
+
+
+def _open_game_props(event_label: str) -> None:
+    """A featured prop tapped on the Dashboard games board:
+    land on Games & Props with that game already open."""
+    st.session_state["browse_game"] = event_label
+    st.session_state["nav_page"] = "Games & Props"
+
+
+st.markdown(
+    "<div class='topbar'>"
+    "<div class='brand'>👑 KINGS SPORTS BOOKS PICKS</div>"
+    "<div class='tag'>💜 Lilly — Neko's own picks platform. "
+    "Paper tracking only — no real bets, no money moved.</div>"
+    "</div>",
+    unsafe_allow_html=True,
 )
-st.sidebar.markdown("---")
-st.sidebar.markdown(
+_chip_col, _logout_col = st.columns([3, 1])
+with _chip_col:
+    st.markdown(
+        f"<span class='profile-chip'>Signed in as "
+        f"{profiles.PROFILE_LABELS[active_profile]}</span>",
+        unsafe_allow_html=True,
+    )
+    if st.session_state.get("via_cookie"):
+        st.caption(
+            "📱 This phone remembers you — no PIN needed on this "
+            "phone. Log out and this phone forgets you."
+        )
+with _logout_col:
+    if st.button("Log out / switch profile", key="logout"):
+        _forget_this_phone()
+        st.session_state.pop("active_profile", None)
+        st.session_state.pop("pending_profile", None)
+        st.session_state.pop("via_cookie", None)
+        st.rerun()
+page = st.radio(
+    "Go to",
+    PAGES,
+    key="nav_page",
+    horizontal=True,
+    label_visibility="collapsed",
+)
+st.caption(
     "Lilly never promises wins. A pick is a chance, never a sure thing. "
     "Sports betting in Michigan is 21+."
 )
@@ -2100,33 +2229,216 @@ def _render_gameday_header():
     )
 
 
-# ================= DASHBOARD =================
-if page == "Dashboard":
-    st.title("👑 Kings Sports Books Picks")
-    _picked_date = _render_date_picker("date_pick_dash")
-    if _picked_date == _today_iso():
-        st.subheader("Today's parlays — built by Lilly")
-    else:
-        st.subheader(
-            f"Parlays for {_date_label(_picked_date)} — "
-            "pre-built by Lilly ahead of time"
+def _render_picklog_word_download() -> None:
+    """⬇️ My pick log — Word: the signed-in profile's own
+    record as a Word file he can open and read back on his
+    phone (Neko, 2026-11-14: "my logs should all be word
+    files"). kings_picks/log_export.py, from the same
+    ledger the raw backups on My Record export. Lives with
+    the Dashboard downloads; if the Word library is somehow
+    missing, the raw backups still stand."""
+    try:
+        log_docx = log_export.build_log_docx(
+            LEDGER.parlays_for_profile(active_profile),
+            profiles.PROFILE_LABELS[active_profile],
         )
-    _render_gameday_header()
-    _pack_stamp = stats_pack.load_pack()[2]
-    if _pack_stamp:
+    except ImportError:
+        log_docx = b""
+    if log_docx:
+        st.download_button(
+            "⬇️ My pick log — Word", data=log_docx,
+            file_name=(
+                f"pick-log-{active_profile.lower()}-"
+                f"{datetime.now().date().isoformat()}.docx"
+            ),
+            mime=(
+                "application/vnd.openxmlformats-officedocument."
+                "wordprocessingml.document"
+            ),
+            key="dl-picklog-word",
+        )
+    else:
         st.caption(
-            f"📦 Backup stats pack aboard — player stats through "
-            f"{_pack_stamp}. Lilly falls back to it whenever a live "
-            "stats feed can't be reached."
+            "📒 Once tickets are on your record, a button appears here to "
+            "download your pick log as a Word file you can read back."
         )
 
+
+def _render_games_board() -> None:
+    """🏟️ The games board — bet365-style matchup rows for
+    the slate on screen: one card per game, and under it
+    odds-style buttons for Lilly's featured props in that
+    game (her best chances). Tapping one lands on Games &
+    Props with that game open, where the full market and
+    the Drop-it-down steppers live. Presentation only —
+    reads the stored slate, fetches nothing."""
+    games = _gameday_games()
+    scored = st.session_state.get("scored") or []
+    st.subheader("🏟️ Today's games")
+    if not games or not scored:
+        st.caption(
+            "No games on the board yet — pull a day above and every "
+            "game shows here with Lilly's featured props."
+        )
+        return
+    by_event: dict[str, list] = {}
+    for pick in scored:
+        by_event.setdefault(pick.event, []).append(pick)
+    for game in games:
+        event = game["event"]
+        when = (
+            game["starts"].strftime("%-I:%M %p ET")
+            if game["starts"]
+            else "start time not listed"
+        )
+        st.markdown(
+            f"<div class='game-card'>"
+            f"<div class='gc-event'>{html.escape(event)}</div>"
+            f"<div class='gc-meta'>{game['sport']} · {when}</div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+        featured = by_event.get(event, [])[:3]
+        if not featured:
+            st.button(
+                "See this game's props →",
+                key=f"board_open_{event}",
+                on_click=_open_game_props,
+                args=(event,),
+            )
+            continue
+        for pick in featured:
+            st.button(
+                f"{pick.player} — {pick.prop} {pick.side} {pick.line:g} "
+                f"· {pick.odds:+d} · Lilly {pick.probability:.0%}",
+                key=f"board_{pick.key}",
+                on_click=_open_game_props,
+                args=(event,),
+            )
+
+
+def _render_slip_summary() -> None:
+    """🎟️ My slip, in short — the Dashboard's compact view
+    of the signed-in profile's slip: the legs, the true
+    combined chance, and the way through to the full
+    builder on the My Slip page. Read-only summary; the
+    slip itself is edited on its own page."""
+    st.subheader("🎟️ My slip")
+    legs = SLIP_BOOK.legs(active_profile)
+    if not legs:
+        st.caption(
+            "Your slip is empty. Build one on the My Slip page — "
+            "or drop a line down on Games & Props and add it there."
+        )
+        st.button(
+            "Open My Slip →", key="dash_open_slip",
+            on_click=_go_to, args=("My Slip",),
+        )
+        return
+    stake = float(st.session_state.get(f"slip_stake_{active_profile}", 10.0))
+    summary = slip.slip_summary(legs, stake)
+    american = (
+        f"{summary['american_odds']:+d}"
+        if summary["american_odds"] is not None
+        else "—"
+    )
+    leg_lines = "<br>".join(
+        f"• {html.escape(leg.label)} ({leg.odds:+d})" for leg in legs
+    )
+    st.markdown(
+        f"<div class='slip-card'>"
+        f"<span class='sc-head'>{len(legs)} pick(s) on your slip</span><br>"
+        f"{leg_lines}<br>"
+        f"<b>True overall chance: {summary['overall_probability']:.1%}</b> "
+        f"&nbsp;|&nbsp; Combined odds: <b>{american}</b>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+    st.button(
+        "Open My Slip →", key="dash_open_slip",
+        on_click=_go_to, args=("My Slip",),
+    )
+
+
+def _render_record_snapshot() -> None:
+    """📊 Your record, at a glance — the settled numbers
+    and Lilly's learning state, in short. The full record,
+    settling and backups live on My Record."""
+    st.subheader("📊 Your record")
+    pstats = PICK_LOG.stats(profile=active_profile)
+    lstats = LEDGER.stats(profile=active_profile)
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Picks logged", pstats["total"])
+    c2.metric("Settled", pstats["settled"])
+    c3.metric(
+        "Pick hit rate",
+        f"{pstats['hit_rate']:.0%}" if pstats["hit_rate"] is not None else "—",
+    )
+    learn_state = LEARNING.refresh(PICK_LOG)
+    settled_live = learn_state.get("settled_live", 0)
+    active = learn_state.get("active_corrections", {})
+    if not settled_live:
+        learn_line = (
+            "🧠 Lilly is still learning — no live picks have settled yet, "
+            "so no corrections are switched on."
+        )
+    elif active:
+        learn_line = (
+            f"🧠 Lilly has settled {settled_live} live picks and "
+            f"{len(active)} learned correction(s) are switched on."
+        )
+    else:
+        learn_line = (
+            f"🧠 Lilly has settled {settled_live} live picks — no bucket "
+            f"has the {learning.MIN_SETTLED} settled picks a correction "
+            "needs yet."
+        )
+    st.caption(
+        f"{lstats['total_parlays']} parlays tracked · "
+        f"{lstats['settled_parlays']} settled. {learn_line}"
+    )
+    st.button(
+        "Open my full record →", key="dash_open_record",
+        on_click=_go_to, args=("My Record",),
+    )
+
+
+# ================= DASHBOARD =================
+# The control center (2026-11-14 rework): everything on
+# display, in tidy sections — (1) day + pull + slate
+# status, (2) ⭐ Special Picks, (3) the games board,
+# (4) Lilly's tickets, (5) my slip in short, (6) the
+# downloads, (7) the record at a glance + Lilly's
+# self-test. Nothing here fetches or rescores outside the
+# pull buttons themselves.
+if page == "Dashboard":
+    st.title("👑 Kings Sports Books Picks")
+
+    # ----- (1) Pick the day, pull, slate status -----
+    _picked_date = _render_date_picker("date_pick_dash")
+    _run_label = (
+        "▶ Run the algorithm — build today's parlays"
+        if _picked_date == _today_iso()
+        else f"▶ Run the algorithm — pre-build {_date_label(_picked_date)}'s parlays"
+    )
+    _run_col, _fresh_col = st.columns(2)
+    if _run_col.button(_run_label):
+        with st.spinner("Lilly is building your parlays..."):
+            run_algorithm(force_refresh=False, game_date=_picked_date)
+        st.success("Done. Parlays saved to the ledger.")
+        st.rerun()
+    if _fresh_col.button("🔄 Pull fresh odds (uses API quota — tap only when you want fresh lines)"):
+        with st.spinner("Fetching fresh live props..."):
+            run_algorithm(force_refresh=True, game_date=_picked_date)
+        st.success("Refreshed.")
+        st.rerun()
+    if not get_client().has_key:
+        st.info(f"🔑 {SETUP_NOTE}")
     if st.session_state["parlays"]:
         st.markdown(
             "<div class='live-banner'>✅ LIVE PROPS — from The Odds API</div>",
             unsafe_allow_html=True,
         )
-    if not get_client().has_key:
-        st.info(f"🔑 {SETUP_NOTE}")
     pulled_at = st.session_state.get("pulled_at", "")
     if pulled_at:
         pulled_when = slate_store.format_pulled_at(pulled_at)
@@ -2140,28 +2452,16 @@ if page == "Dashboard":
             "the app: they stay exactly as pulled until you tap "
             "**🔄 Pull fresh odds**, and only a fresh pull replaces them."
         )
+    _render_gameday_header()
     if st.session_state["note"]:
         st.write(st.session_state["note"])
-
-    _run_label = (
-        "▶ Run the algorithm — build today's parlays"
-        if _picked_date == _today_iso()
-        else f"▶ Run the algorithm — pre-build {_date_label(_picked_date)}'s parlays"
-    )
-    if st.button(_run_label):
-        with st.spinner("Lilly is building your parlays..."):
-            run_algorithm(force_refresh=False, game_date=_picked_date)
-        st.success("Done. Parlays saved to the ledger.")
-
-    if st.button("🔄 Pull fresh odds (uses API quota — tap only when you want fresh lines)"):
-        with st.spinner("Fetching fresh live props..."):
-            run_algorithm(force_refresh=True, game_date=_picked_date)
-        st.success("Refreshed.")
-
-    # ⭐ Special picks: greyed out under 6 NFL games, lit at
-    # 6+, and the built set renders as its own section.
-    _render_special_picks_section()
-
+    _pack_stamp = stats_pack.load_pack()[2]
+    if _pack_stamp:
+        st.caption(
+            f"📦 Backup stats pack aboard — player stats through "
+            f"{_pack_stamp}. Lilly falls back to it whenever a live "
+            "stats feed can't be reached."
+        )
     if not st.session_state["parlays"]:
         if st.session_state.get("mode") == "no_games":
             st.markdown(
@@ -2179,7 +2479,19 @@ if page == "Dashboard":
                 "screen until you pull fresh odds for that day.</div>",
                 unsafe_allow_html=True,
             )
-    else:
+
+    # ----- (2) ⭐ Special picks -----
+    # Greyed out under 6 NFL games, lit at 6+, and the
+    # built set renders as its own section.
+    _render_special_picks_section()
+
+    # ----- (3) The games board -----
+    st.markdown("---")
+    _render_games_board()
+
+    # ----- (4) Lilly's tickets -----
+    if st.session_state["parlays"]:
+        st.markdown("---")
         if (st.session_state.get("slate_date") or "") > _today_iso():
             st.info(
                 "🔮 **Pre-built — an early look.** These picks were built "
@@ -2214,10 +2526,21 @@ if page == "Dashboard":
             render_parlay(parlay, st.session_state["mode"])
             st.markdown("---")
 
-    # ⬇️ The whole pull — odds and picks — as one plain-
-    # English file for his phone. Sits under the tickets it
-    # downloads; with no slate it is a short note instead.
+    # ----- (5) My slip, in short -----
+    st.markdown("---")
+    _render_slip_summary()
+
+    # ----- (6) Downloads -----
+    # ⬇️ The whole pull — odds and picks — as plain-English
+    # files for his phone, plus his pick log as a Word file.
+    st.markdown("---")
+    st.subheader("⬇️ Downloads")
     _render_picks_download()
+    _render_picklog_word_download()
+
+    # ----- (7) The record at a glance + Lilly's self-test -----
+    st.markdown("---")
+    _render_record_snapshot()
 
     # 🧪 Lilly tests her picks: her latest logged slate,
     # graded against recent game-log form. Rendered from the
@@ -2226,18 +2549,34 @@ if page == "Dashboard":
     # the "no picks yet" line inside the expander.
     render_self_test()
 
-# ================= PROPS =================
-elif page == "Props":
-    st.title("📋 Props")
-    st.write("Every prop Lilly can see right now, with its chance and why it was picked.")
-    if not st.session_state["scored"]:
+# ================= GAMES & PROPS =================
+# The market board (2026-11-14 rework): the props browser
+# leads — games as matchup cards, props grouped by player,
+# the book named on every row, Drop-it-down steppers —
+# then Lilly's read of the same board: the chance bands
+# and the per-player breakdown. The day is picked on the
+# Dashboard (one date picker, one home); this page shows
+# the day on screen.
+elif page == "Games & Props":
+    st.title("🏟️ Games & Props")
+    st.write(
+        "Every game on the day and every prop the books actually posted. "
+        "The day is picked on the Dashboard — this page shows the slate "
+        "on screen."
+    )
+    if not st.session_state["scored"] and not st.session_state["raw_props"]:
         st.write("No props loaded yet. Go to the Dashboard and tap **Run the algorithm**.")
     else:
+        # ----- 🎯 The market board: browse the pull, drop lines down -----
+        _render_props_browser(active_profile)
+
+    if st.session_state["scored"]:
         scored = st.session_state["scored"]
         parlays = st.session_state["parlays"]
 
-        # ----- Today's board at a glance -----
-        st.subheader("📊 Today's board at a glance")
+        # ----- The board at a glance -----
+        st.markdown("---")
+        st.subheader("📊 The board at a glance")
         st.write(
             f"{len(scored)} props on the board, grouped by Lilly's chance. "
             "Most props on any board live in the middle bands — that is normal."
@@ -2343,31 +2682,9 @@ elif page == "Props":
                         "inventing stats."
                     )
 
-        # ----- Full list -----
-        st.markdown("---")
-        st.subheader("All props")
-        for pick in st.session_state["scored"]:
-            verdict, _ = lilly.verdict_for_pick(pick.probability, pick.has_form_data, pick.edge)
-            st.markdown(
-                f"<div class='pick-card'>"
-                f"<b style='font-size:18px'>{pick.label}</b> — {pick.sport}<br>"
-                f"Odds: {pick.odds:+d} &nbsp;|&nbsp; Chance: <b>{pick.probability:.0%}</b> &nbsp;|&nbsp; "
-                f"Verdict: <b>{verdict}</b><br>"
-                f"<i>{pick.why}</i>"
-                f"</div>",
-                unsafe_allow_html=True,
-            )
-
-        # ----- 🎯 His actual props: browse the pull, drop lines down -----
-        # Last on the page, under its own date picker: pick a
-        # day, browse that day's real pulled props game by
-        # game, drop a line down, add it to the slip.
-        st.markdown("---")
-        _render_date_picker("date_pick_props")
-        _render_props_browser(active_profile)
 
 # ================= MY SLIP =================
-elif page == "🎟️ My Slip":
+elif page == "My Slip":
     st.title("🎟️ My Slip — build your own picks")
     st.write(
         "Your picks, your call. Add selections from today's board and the "
@@ -2446,7 +2763,7 @@ elif page == "🎟️ My Slip":
             note = (
                 f"Saved {len(added)} new pick(s) to your record"
                 + (f" — {len(already)} leg(s) were already on it (Lilly logged them too)." if already else ".")
-                + " Settle them Won / Lost on Results / Ledger after the games."
+                + " Settle them Won / Lost on My Record after the games."
             )
             st.session_state["slip_flash"] = note
             st.rerun()
@@ -2653,10 +2970,10 @@ elif page == "Players":
 elif page == "💜 Lilly":
     st.title("💜 Lilly")
     st.markdown(lilly.BRIEF)
-    if st.button("▶ Run the algorithm"):
-        with st.spinner("Lilly is building your parlays..."):
-            run_algorithm(force_refresh=False)
-        st.success(f"Built {len(st.session_state['parlays'])} parlays. See the Dashboard.")
+    st.write(
+        "Pulling lives on the Dashboard — this page is Lilly herself: "
+        "who she is, and her chat."
+    )
     st.subheader("Chat with Lilly — always on, works offline")
     st.write("No key needed. She answers from her rules, never from a guess.")
     if "lilly_chat" not in st.session_state:
@@ -2671,9 +2988,9 @@ elif page == "💜 Lilly":
             st.session_state["lilly_chat"].append(("💜 Lilly", reply))
             st.rerun()
 
-# ================= RESULTS / LEDGER =================
-elif page == "Results / Ledger":
-    st.title("📊 Results / Ledger")
+# ================= MY RECORD =================
+elif page == "My Record":
+    st.title("📊 My Record")
     st.write(
         "Paper tracking only. Mark each pick won or lost after the games. "
         "This record is what proves the picks work — or do not — over time."
@@ -2698,7 +3015,9 @@ elif page == "Results / Ledger":
         with st.expander(f"{lp.date} — {lp.label} ({lp.mode}) — {lp.picks_won} won / {lp.picks_lost} lost / {lp.picks_pending} pending"):
             for pick in lp.picks:
                 c1, c2, c3 = st.columns([5, 1, 1])
-                c1.write(f"{pick['label']} — chance {pick['probability']:.0%} — {pick['result']}")
+                book = pick.get("bookmaker") or ""
+                book_text = f" — at {book}" if book else ""
+                c1.write(f"{pick['label']} — chance {pick['probability']:.0%} — {pick['result']}{book_text}")
                 if c2.button("✅ Won", key=f"w-{lp.id}-{pick['key']}"):
                     LEDGER.settle_pick(lp.id, pick["key"], True)
                     st.rerun()
@@ -2758,11 +3077,17 @@ elif page == "Results / Ledger":
                 manual_tag = " · ✋ Your pick" if getattr(entry, "source", "lilly") == "manual" else ""
                 king_tag = " · 👑 King's style" if getattr(entry, "style", "standard") == "king" else ""
                 i_played = active_profile in entry.played_by
+                book_text = (
+                    f"Book: {entry.bookmaker} &nbsp;|&nbsp; "
+                    if getattr(entry, "bookmaker", "")
+                    else ""
+                )
                 st.markdown(
                     f"<div class='pick-card'>"
                     f"<b style='font-size:17px'>{entry.label}</b> — {entry.sport}{manual_tag}{king_tag} · {entry.model}<br>"
                     f"{entry.event} &nbsp;|&nbsp; Odds: {entry.odds:+d} &nbsp;|&nbsp; "
                     f"Chance: <b>{entry.probability:.0%}</b> &nbsp;|&nbsp; "
+                    f"{book_text}"
                     f"Pulled {entry_stamp(entry)}"
                     f"</div>",
                     unsafe_allow_html=True,
@@ -2790,8 +3115,13 @@ elif page == "Results / Ledger":
                     f" · played by {', '.join(entry.played_by)}" if entry.played_by else ""
                 )
                 learned_note = f" · 📚 learned: {entry.learning}" if entry.learning else ""
+                book_note = (
+                    f" · {entry.bookmaker}"
+                    if getattr(entry, "bookmaker", "")
+                    else ""
+                )
                 st.write(
-                    f"{mark} — **{entry.label}** — {entry.event} · {entry.date}{manual_tag}{king_tag} · {entry.model}{played_note}{learned_note} · pulled {entry_stamp(entry)}"
+                    f"{mark} — **{entry.label}** — {entry.event} · {entry.date}{manual_tag}{king_tag} · {entry.model}{played_note}{learned_note}{book_note} · pulled {entry_stamp(entry)}"
                 )
             if len(settled_entries) > 30:
                 st.caption(f"Showing the newest 30 of {len(settled_entries)} settled picks.")
@@ -2934,37 +3264,13 @@ elif page == "Results / Ledger":
         file_name=f"lilly-lessons-{today_str}.jsonl", mime="application/json",
         key="dl-lessons-jsonl",
     )
-    # The readable one: the signed-in profile's own record as
-    # a Word file he can open and read back on his phone
-    # (Neko, 2026-11-14: "my logs should all be word files").
-    # kings_picks/log_export.py, from the same ledger the
-    # backups above export raw. If the Word library is
-    # somehow missing, the raw backups still stand.
-    try:
-        log_docx = log_export.build_log_docx(
-            LEDGER.parlays_for_profile(active_profile),
-            profiles.PROFILE_LABELS[active_profile],
-        )
-    except ImportError:
-        log_docx = b""
-    if log_docx:
-        st.download_button(
-            "⬇️ My pick log — Word", data=log_docx,
-            file_name=f"pick-log-{active_profile.lower()}-{today_str}.docx",
-            mime=(
-                "application/vnd.openxmlformats-officedocument."
-                "wordprocessingml.document"
-            ),
-            key="dl-picklog-word",
-        )
-    else:
-        st.caption(
-            "📒 Once tickets are on your record, a button appears here to "
-            "download your pick log as a Word file you can read back."
-        )
+    # The readable Word copy of this record lives with the
+    # Dashboard downloads ("⬇️ My pick log — Word") — one
+    # home for it (2026-11-14 rework). The raw backups above
+    # stay here, next to the record they back up.
 
 # ================= SETUP =================
-elif page == "Setup":
+elif page == "⚙️ Setup":
     st.title("⚙️ Setup")
     client = get_client()
     if client.has_key:

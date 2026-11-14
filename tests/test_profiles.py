@@ -249,8 +249,8 @@ def test_app_king_login_opens_app_and_logout_returns():
     at.text_input(key="pin_entry").set_value("1111")
     _click_submit(at, "Log in")
     assert at.session_state["active_profile"] == "King"
-    sidebar_text = "\n".join(m.value for m in at.sidebar.markdown)
-    assert "Signed in as 👑 King" in sidebar_text
+    topbar_text = "\n".join(m.value for m in at.markdown)
+    assert "Signed in as 👑 King" in topbar_text
     # The real app is open now (page radio + Dashboard run button).
     assert list(at.radio) != []
     assert any("Run the algorithm" in b.label for b in at.button)
@@ -272,8 +272,8 @@ def test_app_kohen_login_uses_kohen_profile():
     at.text_input(key="pin_entry").set_value("2222")
     _click_submit(at, "Log in")
     assert at.session_state["active_profile"] == "Kohen"
-    sidebar_text = "\n".join(m.value for m in at.sidebar.markdown)
-    assert "Signed in as Kohen" in sidebar_text
+    topbar_text = "\n".join(m.value for m in at.markdown)
+    assert "Signed in as Kohen" in topbar_text
 
 
 # ---------- remember-me cookie: profile_from_cookie ----------

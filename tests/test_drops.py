@@ -628,7 +628,7 @@ def test_app_drop_expander_renders_honestly_on_a_live_board(monkeypatch):
     _install_fake_client(monkeypatch)
     at.session_state["stats_store"] = _FakeStore()
     radios = list(at.radio)
-    radios[0].set_value("🎟️ My Slip").run()
+    radios[0].set_value("My Slip").run()
     assert not at.exception, f"app raised: {at.exception}"
     load = [b for b in at.button if "Load today's board" in b.label]
     load[0].click().run()

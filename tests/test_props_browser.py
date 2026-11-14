@@ -172,7 +172,7 @@ def _pull_and_open_props(at):
     assert not at.exception, f"app raised: {at.exception}"
     radios = list(at.radio)
     assert radios, "app page radio missing after login"
-    radios[0].set_value("Props").run()
+    radios[0].set_value("Games & Props").run()
     assert not at.exception, f"app raised: {at.exception}"
 
 
@@ -274,7 +274,7 @@ def test_drop_stepper_shows_real_price_and_grade_then_adds_the_dropped_leg(
     # On My Slip the whole slip is graded as one, and saving
     # writes the DROPPED line into his record as his own pick.
     radios = list(at.radio)
-    radios[0].set_value("🎟️ My Slip").run()
+    radios[0].set_value("My Slip").run()
     assert not at.exception, f"app raised: {at.exception}"
     text = _all_text(at)
     assert "Test my picks" in text

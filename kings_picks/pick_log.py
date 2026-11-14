@@ -165,6 +165,14 @@ class PickEntry:
     # instant. Entries saved before stamps existed load with
     # "" and display by date alone (see entry_stamp).
     created_at: str = ""
+    # The sportsbook that priced this leg ("bet365" /
+    # "BetMGM"), copied from the prop the parser pulled —
+    # the parser always knew it; the log simply never kept
+    # it until 2026-11-14. Optional and backward-compatible:
+    # entries saved before the field existed load with ""
+    # and exports show the book only when one is recorded —
+    # never an invented one.
+    bookmaker: str = ""
 
 
 class PickLog:
@@ -264,6 +272,7 @@ class PickLog:
                     learning=getattr(pick, "learning", "") or "",
                     style=style,
                     created_at=created_at,
+                    bookmaker=getattr(pick, "bookmaker", "") or "",
                 )
                 self.entries.append(entry)
                 added.append(entry)
@@ -329,6 +338,7 @@ class PickLog:
                 model=SCORING_VERSION,
                 source="manual",
                 created_at=created_at,
+                bookmaker=getattr(leg, "bookmaker", "") or "",
             )
             self.entries.append(entry)
             added.append(entry)

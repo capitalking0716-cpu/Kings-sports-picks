@@ -43,6 +43,13 @@ class LedgerPick:
     probability: float
     odds: int
     result: str = "pending"  # pending | won | lost
+    # The sportsbook that priced this leg, copied from the
+    # pulled prop when the parlay was recorded (2026-11-14).
+    # Picks are stored as plain dicts, so records saved
+    # before this field existed simply have no "bookmaker"
+    # key — readers show the book only when one is present
+    # and never invent one.
+    bookmaker: str = ""
 
 
 @dataclass
@@ -129,7 +136,10 @@ class Ledger:
                 profile=profile,
                 model=model,
                 picks=[
-                    asdict(LedgerPick(key=p.key, label=p.label, probability=p.probability, odds=p.odds))
+                    asdict(LedgerPick(
+                        key=p.key, label=p.label, probability=p.probability,
+                        odds=p.odds, bookmaker=getattr(p, "bookmaker", "") or "",
+                    ))
                     for p in parlay.picks
                 ],
             )

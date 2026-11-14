@@ -527,7 +527,7 @@ def test_app_results_show_stamps_and_demo_entries_are_gone(
     # The purge ran at app load: the file holds live only.
     on_disk = json.loads((tmp_path / "data" / "pick_log.json").read_text())
     assert {row["mode"] for row in on_disk} == {"live"}
-    list(at.radio)[0].set_value("Results / Ledger").run()
+    list(at.radio)[0].set_value("My Record").run()
     assert not at.exception, f"app raised: {at.exception}"
     text = _all_text(at)
     assert "Stamped Player" in text
@@ -544,7 +544,7 @@ def test_app_my_slip_summary_is_a_ticket(tmp_path, monkeypatch):
     _install_fake_client(monkeypatch, holder, [])
     at = _login_as_king(_run_app(FAKE_SECRETS))
     [b for b in at.button if "Run the algorithm" in b.label][0].click().run()
-    list(at.radio)[0].set_value("🎟️ My Slip").run()
+    list(at.radio)[0].set_value("My Slip").run()
     assert not at.exception, f"app raised: {at.exception}"
     add = [b for b in at.button if b.label == "➕ Add to slip"]
     assert add, "no Add to slip buttons on the board"
